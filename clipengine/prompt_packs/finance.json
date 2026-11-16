@@ -1,0 +1,19 @@
+{
+ "niche": "finance",
+ "kind": "finance / investing talk",
+ "rubric": "This is a finance or investing transcript (markets, stocks, crypto, personal finance, business). A great clip is ONE claim with its reason: a prediction or a call with why, a surprising number explained, a money lesson from a story, or a hot take on a company, policy or market move. It opens on the claim, the number or the question, and ends once the reason or the conclusion is said, never before the number or the \"because\". Reject disclaimers, sponsor reads, ticker or chart lists with no point, and housekeeping.",
+ "outline": "A topic is one claim, one stock, coin or company, one chart, or one question and its answer. A new topic starts at the next ticker, the next chart or headline, or a change of subject. Disclaimers, sponsor reads and housekeeping belong to no topic.",
+ "review": "A finance clip must say its claim and its reason or number: never end on the next ticker, a disclaimer, or the move to the next chart.",
+ "wrapup": [
+  "not financial advice",
+  "this is not financial advice",
+  "this isn't financial advice",
+  "do your own research",
+  "let's look at the next",
+  "next chart",
+  "next stock",
+  "next ticker",
+  "let's move on to",
+  "let's talk about"
+ ]
+}

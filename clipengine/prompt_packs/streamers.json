@@ -1,0 +1,25 @@
+{
+ "niche": "streamers",
+ "kind": "livestream",
+ "rubric": "This is a livestream transcript (IRL, just chatting or gaming streamers). A great clip is a REACTION moment or a bit: what just happened or what they were trying (the setup that makes it land), then the reaction itself (shock, rage, hype, laughter, a roast), ending once it has landed. A short story the streamer tells with a punchline also works. Reject reading chat out loud, thanking donations and subs, idle commentary, setting up the stream and technical downtime. A 💬 after the time marks a sentence where Twitch chat blew up in the seconds just after it (spam, KEKW/LUL, CLIP IT) - a strong hint the reaction landed. Judge by meaning; 💬 is a signal, not a guarantee.",
+ "outline": "A topic is one event or bit: one encounter, one round or attempt, one story, one conversation with chat or a guest about one thing. A new topic starts when the streamer moves on (next game, next person, next video, \"alright chat\"). Reading donations, alerts and dead air belong to no topic.",
+ "review": "A stream clip needs the setup a cold viewer must see to get the reaction, and ends once the reaction has landed: not on the streamer turning back to chat, reading a donation, or starting the next thing.",
+ "wrapup": [
+  "alright chat",
+  "all right chat",
+  "okay chat",
+  "ok chat",
+  "anyway chat",
+  "chat what",
+  "let's go next",
+  "next game",
+  "next one",
+  "let's queue",
+  "queue up",
+  "thank you for the",
+  "thanks for the sub",
+  "thanks for the prime",
+  "thanks for the bits",
+  "appreciate the sub"
+ ]
+}

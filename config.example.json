@@ -1,0 +1,267 @@
+{
+ "_doc": "clip-engine-core defaults. A user file (cli --config, env CLIPENGINE_CONFIG) merges over this one key by key; see clipengine/config.py.",
+ "scratch_dir": ".cache",
+ "select": {
+  "top_n": 6,
+  "transcribe_model": "base.en",
+  "refine_model": "small.en",
+  "semantic_backend": "claude_cli",
+  "semantic_model": "opus",
+  "semantic_fallback_backend": "ollama",
+  "semantic_fallback_model": "qwen2.5:7b",
+  "semantic_timeout_s": 300,
+  "chunk_s": 900,
+  "chunk_overlap_s": 120,
+  "skip_head_s": 90,
+  "skip_tail_s": 30,
+  "overlap_max": 0.3,
+  "lead_pad_s": 0.15,
+  "tail_pad_s": 0.35,
+  "sentence_gap_s": 0.7,
+  "hard_gap_s": 1.5,
+  "min_speech_density": 0.15,
+  "window_transcript": {
+   "_doc": "One strong, aligned transcript per source (engine.window_pass): the source is heard once by model (the captions' strong model) with the source's title as whisper's prompt (prompt), its words seated on the audio (seat). Select's sentences, the LLM's transcript and the precision cuts read it, and the caption step slices each clip's words from it. Off by default: on a measured sample it improved clip endings but not starts, and it is slow on a shared CPU host. Env WINDOW_TRANSCRIPT=0 turns it off.",
+   "enabled": false,
+   "model": "large-v3-turbo",
+   "prompt": true,
+   "seat": true
+  },
+  "topic_map": {
+   "_doc": "One outline call per source before the picks (select's backend and model; model null = semantic_model), cached per source under <scratch_dir>/topic_maps. Each topic's core span (lead-in small talk and the trailing wrap-up left out) becomes a time span; every pick is kept inside the one topic it overlaps most (a pick in no topic is dropped), and the precision pass, edge-verify, snap and the cut review keep the cut inside it. Off, an error or a garbage answer: select and the review run without a map. Env TOPIC_MAP=0 turns it off.",
+   "enabled": true,
+   "model": null,
+   "timeout_s": 60,
+   "min_topic_s": 20,
+   "min_words": 50,
+   "_editor_rule_doc": "true puts the topic tags and a 'first and last line must both be T<n> lines' sentence in the cut review's prompt. Off (the default): the review's answer is still clamped into the clip's topic in code; with the tags the editor trimmed lines it should have kept.",
+   "editor_rule": false
+  },
+  "end_rule": {
+   "_doc": "A clip never ends on the trailing wrap-up (boundaries.wrapup_sentence: sign-offs, subscribe / link lines, 'anyway', 'so yeah', 'moving on', tag-only and filler-only lines, a turn to the next topic, plus the niche pack's own wrap-up openers). Enforced in code on select's cuts and on the cut review's answer. Env END_RULE=0 turns it off.",
+   "enabled": true,
+   "_prompt_line_doc": "true also adds the END RULE line to select's and the cut review's prompts. Off (the default): the rule runs in code only; the prompt line cost lifestyle and finance clips.",
+   "prompt_line": false
+  },
+  "prompt_packs": {
+   "_doc": "Per-niche prompt packs, clipengine/prompt_packs/<niche>.json (podcasts, streamers, tech, lifestyle, gaming, poker, finance): select's rubric, the outline's topic guide, the cut review's criteria and wrap-up openers. A niche with no pack uses its vertical's prompts. Env PROMPT_PACKS=0 turns them off.",
+   "enabled": true
+  },
+  "verticals": {
+   "podcast": {
+    "min_dur_s": 15,
+    "max_dur_s": 75,
+    "w_llm": 1.0,
+    "w_energy": 0.0
+   },
+   "poker": {
+    "min_dur_s": 15,
+    "max_dur_s": 60,
+    "w_llm": 0.6,
+    "w_energy": 0.4
+   },
+   "stream": {
+    "min_dur_s": 10,
+    "max_dur_s": 60,
+    "w_llm": 0.5,
+    "w_energy": 0.5
+   },
+   "general": {
+    "min_dur_s": 15,
+    "max_dur_s": 75,
+    "w_llm": 0.8,
+    "w_energy": 0.2
+   }
+  }
+ },
+ "quality_gate": {
+  "_doc": "Gate thresholds. Every numeric value is the same across layouts; what differs is which measures a layout opts into (exempt_edge_cut_transitions, exempt_low_motion_frames, skip_frame_gate, exempt_head_tail_track_carry). The gate rejects any clip that fails after exemptions, never by raising a cap. See quality_gate.measure_frame_gate.",
+  "default": {
+   "_fail_pct_doc": "At 2.0 the frame gate rejected clips whose face was out of frame for 2.5-7 % of frames (well under a second of a cutaway or a head turn); 8.0 keeps those. The first/last-second rule (head/tail tolerance 0) still fails a clip that opens or closes off the face.",
+   "gate_fail_pct_max": 8.0,
+   "gate_head_tol_frames": 0,
+   "gate_tail_tol_frames": 0,
+   "gate_broll_min_span_s": 3.0,
+   "gate_skip_frame_gate": false,
+   "gate_exempt_edge_cut_transitions": false,
+   "gate_exempt_low_motion_frames": false
+  },
+  "second_asr": {
+   "_doc": "An independent ASR pass the gate compares the burned captions, the ending and the hook against. Must differ from select.transcribe_model / refine_model and render.caption_model (second_asr.independent). Runs on the clip's source span plus tail_s after the cut via the openai-whisper CLI, cached under <scratch_dir>/second_asr.",
+   "enabled": true,
+   "model": "small",
+   "tail_s": 2.0,
+   "threads": 4
+  },
+  "cut_audio": {
+   "_doc": "The cut checks read the source audio: a cut whose 20 ms frame is 15 dB under the clip's median frame, inside a quiet run of at least 0.1 s, is in a pause and never inside a word. A word a transcript stretched over it is read on the side of the cut its voice is on (quality_gate.seat_on_cut_audio) by word_boundaries and sentence_bounds, and the ending's mid-word rule does not fire; the pre-render cut checks read it the same way. No audio: the word times decide. Env CUT_AUDIO=0 turns it off.",
+   "enabled": true
+  },
+  "caption_tiebreak": {
+   "_doc": "The second ASR is not ground truth. When the burned captions fail the caption check against it, a third model (model) that no caption pass and not the second ASR uses hears the same span; the check fails only when the captions also fail against it. Off by default: it lets a few clips with wrong captions through (a word every model mishears). Env CAPTION_TIEBREAK=0 turns it off.",
+   "enabled": false,
+   "model": "medium"
+  },
+  "hook_judge": {
+   "_doc": "After the lexical grounding floor, a semantic judge (quality_gate.HOOK_GROUND_PROMPT on select's backend and semantic_model) fails a hook that names the wrong subject, states a claim the clip contradicts or never touches, or is off topic. A judge error leaves the lexical verdict standing.",
+   "enabled": true
+  },
+  "layouts": {
+   "track": {
+    "note": "default: strict. Face fully inside on >= the frame-gate share of frames, 0 fails in the first/last 1 s."
+   },
+   "full_bleed_speaker": {
+    "note": "Handheld / single-speaker: the same strict thresholds as track. No smart exemptions: a drifting subject is a hard fail."
+   },
+   "chart_top_cam_bottom": {
+    "gate_exempt_head_tail_track_carry": true,
+    "note": "Stacked chart on top, cam at the bottom: the chart band is a legitimate subject, and the frame gate measures the face in the bottom cam crop with the strict defaults. The small cam face is sometimes missed in the opening second (motion blur, off-angle), so this layout opts into the head/tail track carry: upscale the frame and re-detect, else exempt a 'none' frame when a stable face anchor starts within 1 s. A dead opening with no face anywhere in the next 1 s still fails."
+   },
+   "stream_split": {
+    "note": "Stream + presenter stacked. The same strict defaults; the split crop puts the face bottom-left so the strict rule applies."
+   },
+   "podcast_two_shot": {
+    "gate_exempt_edge_cut_transitions": true,
+    "note": "Two-speaker podcasts: when the crop pans between speakers there is a brief window where the leaving face is edge-cut, no face is fully inside, then the arriving face is edge-cut. That pattern is measured as a transition window (an edge-cut face is still a visible subject) and exempted. A lost subject with no face at all for >= 0.5 s still fails."
+   },
+   "product_full_bleed": {
+    "gate_exempt_low_motion_frames": true,
+    "note": "Product-centric footage: a frame with no face and low scene motion is a deliberate product shot; a frame with no face and high motion is drift / a lost subject and still fails. No face at the head/tail 1 s is tolerated only on low-motion (static product) frames."
+   },
+   "gamestack": {
+    "gate_skip_frame_gate": true,
+    "note": "Gameplay: no face expected on screen anywhere, so frame_gate is skipped. A/V sync, captions, crop_step and word_boundaries are still measured."
+   }
+  }
+ },
+ "render": {
+  "crop_feasibility": {
+   "_doc": "Before select's transcribe, a niche source whose speaker crop cannot be made without slicing a graphic is dropped (render/cropcheck.probe: banners.scan at 1 fps + 3 OCR frames), and candidate spans below cropcheck.SPAN_MIN_OK are dropped before their render. dual_view_fallback_niches: the niches whose single-view clips that sliced the screen render once more as the dual view (empty: tech and finance never stack; reviewers rejected the stacked dual view on nearly every such clip).",
+   "enabled": true,
+   "dual_view_fallback_niches": []
+  },
+  "caption_model": "small.en",
+  "caption_strong_model": "large-v3-turbo",
+  "caption_prompt": {
+   "_doc": "The strong caption pass gets the source's title (cli --title), punctuated, as whisper's initial prompt (curly quotes straightened, emoji out). Without a prompt large-v3-turbo with --condition_on_previous_text False often comes back lower case with no . ? !; with the title the same spans come back punctuated and with names cased, and every sentence check reads that punctuation. Env CAPTION_PROMPT=0 turns it off.",
+   "enabled": true
+  },
+  "crosstalk_confirm": {
+   "_doc": "Just before the render, every crosstalk-flagged caption phrase on the clip (\"cap\": false from select's or the caption step's crosstalk filter) that the gate's second ASR also hears (>= half its tokens, the filter's own agreement rule) is burned again; it keeps \"crosstalk\": true for the cut logic. The pass is the gate's own (cached for the caption check and the gate). Only a run of 3+ tokens counts, and only heard words the burned captions do not already carry confirm it. Phrases the caption repair unburned as heard by nobody stay unburned. Env CROSSTALK_CONFIRM=0 turns it off.",
+   "enabled": true
+  },
+  "caption_check": {
+   "_doc": "Before the render the caption track is read the way the gate will read it (its caption check on the second ASR, the pass it then reads from its cache) and for timing faults (more than 10 words in a second, words with no duration, 6 heard words in a row with no caption). A track with a problem is re-heard: the span around the cut (lead_s before, tail_s after) re-transcribed with the strong model (whisper_args: extra CLI options), a phrase burned when select's words or the second ASR confirm it; then the caption repair's tie-break vote on the better track. The best-reading track whose cut still passes the gate's checks is burned; the cut never moves. Env CAPTION_CHECK=0 turns it off.",
+   "enabled": true,
+   "lead_s": 12.0,
+   "tail_s": 2.5,
+   "vote": true,
+   "whisper_args": []
+  },
+  "caption_context": {
+   "_doc": "The strong caption pass hears lead_s before the cut and tail_s after it (the gate's second ASR hears 2 s past the cut), and with seat its words are seated on the audio (boundaries.seat_onsets) before the clip's own are picked by their middle. At +-0.5 s large-v3-turbo dropped first words, punctuated sentence ends the speaker talks on past, and often came back unpunctuated. Off: lead_s 0.5, tail_s 0.5, seat false.",
+   "lead_s": 1.5,
+   "tail_s": 2.0,
+   "seat": true
+  },
+  "loudnorm_lufs": -14,
+  "speaker": {
+   "enabled": true,
+   "sample_fps": 10.0,
+   "decision_hop_s": 0.5,
+   "min_hold_s": 2.5,
+   "switch_margin": 0.35,
+   "min_candidate_run_s": 1.2,
+   "dead_zone": 0.12,
+   "min_faces_multi": 2,
+   "tie_tol": 0.5
+  },
+  "vertical_layouts": {
+   "poker": "hudband",
+   "gaming": "gamestack",
+   "stream": "gamestack",
+   "reaction": "reaction",
+   "screencast": "screencast",
+   "podcast": "track",
+   "interview": "track",
+   "general": "track",
+   "product": "track"
+  },
+  "gamestack": {
+   "_doc": "v2 (render/gamelayout.py): a header_h (<= 200) hook header, then the game band showing game_share (>= 0.48; 0.50 -> 1080x1214, 63 % of the canvas) of the source width at full height, following the action, the captions on its lower rows; the cam a card right under the band in a bottom corner of at most cam_max_area (<= 0.14) of the canvas. No face: game_only_share (0.42 -> 1446 rows), no card. Blurred fill <= 25 %. v2 false = the v1 stack (a top_h game band, the full-width cam band below).",
+   "top_h": 1344,
+   "v2": true,
+   "game_share": 0.5,
+   "cam_max_area": 0.12,
+   "game_only_share": 0.42,
+   "header_h": 200
+  },
+  "reaction": {
+   "top_h": 960,
+   "content_fit": "fit"
+  },
+  "screencast": {
+   "top_h": 1300,
+   "content_zoom": "wide"
+  },
+  "game_genres": {
+   "fortnite": "tight",
+   "warzone": "tight",
+   "apex legends": "tight",
+   "call of duty": "tight",
+   "battlefield": "tight",
+   "valorant": "tight",
+   "counter-strike": "tight",
+   "cs2": "tight",
+   "overwatch 2": "tight",
+   "marvel rivals": "tight",
+   "the finals": "tight",
+   "arc raiders": "tight",
+   "grand theft auto v": "tight",
+   "minecraft": "tight",
+   "league of legends": "wide",
+   "dota 2": "wide",
+   "teamfight tactics": "wide",
+   "starcraft ii": "wide",
+   "age of empires ii": "wide",
+   "hearthstone": "wide",
+   "chess": "wide"
+  },
+  "vertical_hud_profile": {
+   "poker": "high_stakes_poker"
+  },
+  "hud_profiles": {
+   "high_stakes_poker": {
+    "_source_note": "Regions measured on a 1280x720 high-stakes cash-game broadcast: two stacked player tiles (photo + cards + name + action + equity %) bottom-left, the community cards + POT + show bar bottom-right, and the top graphic band. A frame with a full-screen graphic and no HUD was used to check that the presence threshold rejects non-HUD content. Boxes are the visible HUD extents padded by a few px on each side.",
+    "_measurement_note": "players spans y=405..690 (both stacked tiles); pot spans y=530..690 (community cards + POT + show bar) and x=935..1155, clear of the broadcaster's logo at x>=1180; outs_strip covers the full top graphic band up to y=82 (the top strip with the community / outs cards and the broadcaster's banner, and the second tier that appears whenever an outs or hole-card row is up). x=0..1.0 also puts the persistent logo bug inside the y_off exclusion so it never leaks into the top crop.",
+    "players": [
+     0.0078,
+     0.5625,
+     0.2734,
+     0.9583
+    ],
+    "pot": [
+     0.7305,
+     0.7361,
+     0.9023,
+     0.9583
+    ],
+    "outs_strip": [
+     0.0,
+     0.0,
+     1.0,
+     0.15
+    ]
+   }
+  },
+  "font_dir": null,
+  "_font_dir_doc": "Folder holding Inter-VF.ttf (the caption and hook font). null: env CLIPENGINE_FONT_DIR, else a system bold font (DejaVu Sans Bold, Liberation Sans Bold). CLIP_FONT_PATH names a font file directly and wins over both."
+ },
+ "layout_crops": {
+  "screencast": {
+   "top": "600:720:190:0",
+   "bottom": "300:365:980:82",
+   "split": 1320
+  }
+ }
+}

@@ -1,0 +1,19 @@
+{
+ "niche": "gaming",
+ "kind": "gaming video / stream",
+ "rubric": "This is a gaming video or stream transcript. A great clip is ONE play or moment: a clutch, a fail, a glitch, an outplay or a funny exchange, with the setup that makes it land (what is at stake, what they are trying) and the reaction after it. A strong, specific hot take on a game also works when it gives its reason. Reject menus, loading, looting and walking with no stakes, settings talk, and sponsor reads. A 💬 after the time marks a sentence where Twitch chat blew up in the seconds just after it (spam, KEKW/LUL, CLIP IT) - a strong hint the reaction landed. Judge by meaning; 💬 is a signal, not a guarantee.",
+ "outline": "A topic is one play, round, fight or match moment, or one opinion about one game or feature. A new topic starts at the next round, the next fight, a new objective, or a change of subject. Menus, loading screens and idle travel belong to no topic.",
+ "review": "A gaming clip must show the stakes before the play and end after the reaction to it: not on the next round starting, a menu, or talk about something else.",
+ "wrapup": [
+  "next game",
+  "next round",
+  "next match",
+  "let's queue",
+  "queue up",
+  "back to the lobby",
+  "let's run it back",
+  "alright chat",
+  "all right chat",
+  "okay chat"
+ ]
+}

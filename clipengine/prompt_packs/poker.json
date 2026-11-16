@@ -1,0 +1,19 @@
+{
+ "niche": "poker",
+ "kind": "poker broadcast / vlog",
+ "rubric": "This is a poker broadcast or vlog transcript (commentary and table talk). A great clip is ONE HAND: start at the moment the stakes are clear (the big bet, the shove, the tough decision), run through the reveal (cards turned over, the pot shipped) and end once the commentator or table reaction has landed. A sharp table-talk exchange or a story about one hand also works. Do not start on routine preflop chatter; do not cut before the reaction. Reject breaks, sponsor reads, chip-count recaps and dead table talk.",
+ "outline": "A topic is ONE HAND from the bet that matters to the reaction after the showdown, or one story or exchange about one hand. A new topic starts at the next hand (new deal, new players named, \"next hand\"). Chip counts, breaks and sponsor reads belong to no topic.",
+ "review": "A poker clip is one hand: it must include the decision that matters and end after the reveal and the reaction, not on the next deal, a chip count, or a cut to a break.",
+ "wrapup": [
+  "next hand",
+  "on to the next hand",
+  "let's see the next hand",
+  "let's go to the next",
+  "we'll see you after the break",
+  "back after this",
+  "after the break",
+  "chip counts",
+  "let's check the chip counts",
+  "let's look at the chip counts"
+ ]
+}

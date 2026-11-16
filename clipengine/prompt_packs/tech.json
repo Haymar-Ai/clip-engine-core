@@ -1,0 +1,20 @@
+{
+ "niche": "tech",
+ "kind": "tech review / explainer",
+ "rubric": "This is a tech video transcript (reviews, explainers, tech news, commentary). A great clip is ONE point with its proof: a verdict with the reason (\"this is the best ... because\"), a surprising test result or number, a hidden feature, a strong comparison, or a hot take on a company or product. It opens on the claim or the question, never on a spec list or \"so next\", and ends once the verdict or result is said. Reject sponsor reads, unboxing filler, spec lists with no verdict, and channel housekeeping.",
+ "outline": "A topic is one product, one feature, one test or one argument. A new topic starts at the next feature, the next test, the next product or the next news item. Sponsor segments, intros and outros belong to no topic.",
+ "review": "A tech clip must state its point and reach its verdict or result: never end on the set-up of the next feature, a spec list, or the move to the sponsor.",
+ "wrapup": [
+  "let's move on to",
+  "let's talk about",
+  "let's look at",
+  "next up",
+  "next is",
+  "next we have",
+  "use code",
+  "link in the description",
+  "this video is sponsored",
+  "today's sponsor",
+  "but first"
+ ]
+}

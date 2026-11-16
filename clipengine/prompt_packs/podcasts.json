@@ -1,0 +1,15 @@
+{
+ "niche": "podcasts",
+ "kind": "podcast / talk",
+ "rubric": "This is a podcast / interview transcript. A great clip is ONE complete idea a stranger would stop for: a bold claim or hot take with the reason behind it, a story with its payoff, a surprising fact, or a question and the guest's full answer. It opens on the HOOK (the claim, the question or the first line of the story; never a greeting, a \"so, yeah\" or the tail of the last answer), is SELF-CONTAINED (no \"like I said\", no unexplained \"he\" or \"that\"), and ends on the PAYOFF line. Reject intros, sponsor and ad reads, housekeeping, plugs, and rambling with no point.",
+ "outline": "A topic is one question and its whole answer, one story, or one argument. A new topic starts at a new question from the host, a new story, or a clear change of subject; a follow-up question about the same story is the same topic. Ad reads, plugs and intro banter belong to no topic.",
+ "review": "A podcast clip must carry one complete idea: keep the question when the answer needs it, and end on the line that lands the answer or the story, not on the host's reaction, a laugh line that starts a tangent, or the next question.",
+ "wrapup": [
+  "let's get into",
+  "but before we",
+  "before we get into",
+  "we'll get to that",
+  "i'll let you go",
+  "where can people find"
+ ]
+}
