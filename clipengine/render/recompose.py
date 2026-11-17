@@ -4771,7 +4771,9 @@ def _gate_text_items(src, a, sc):
 
 
 def mute_spans(spec):
-    """--mute "a-b,c-d" (clip seconds) -> [(a, b)]."""
+    """--mute "a-b,c-d" (clip seconds; a list of them when --mute is repeated) -> [(a, b)]."""
+    if isinstance(spec, (list, tuple)):
+        spec = ",".join(str(s) for s in spec if s)
     out = []
     for part in str(spec or "").split(","):
         if part.strip():
@@ -5213,7 +5215,8 @@ def parse_args(argv=None):
                     help="JSON [[x0,y0,x1,y1], ...] src px the clean crop leaves outside")
     ap.add_argument("--caption-zone", choices=["default", "auto"], default="default",
                     help="auto: captions move to rows the clip's on-screen text leaves free")
-    ap.add_argument("--mute", default=None, help="clip-second spans 'a-b,c-d' to mute (bleep)")
+    ap.add_argument("--mute", default=None, action="append",
+                    help="clip-second spans 'a-b,c-d' to mute (bleep); repeatable, merged")
     ap.add_argument("--levels", action="store_true",
                     help="measure a mild levels lift for any vertical (too-dark repair)")
     ap.add_argument("--content-zoom", choices=["cover", "wide"], default=None,

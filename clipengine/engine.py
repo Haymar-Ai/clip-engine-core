@@ -19,6 +19,7 @@ from clipengine import quality_gate
 from clipengine import pick_quality
 from clipengine import reason_codes
 from clipengine import crosstalk
+from clipengine import slurs
 from clipengine import strong_asr
 from clipengine import ytdl
 
@@ -1384,7 +1385,10 @@ def recompose_cmd(clip, src, media, out):
     if game:
         cmd += ["--game", str(game)]
     if clip.get("words_path") and Path(clip["words_path"]).exists():
-        cmd += ["--words", clip["words_path"]]
+        words_path, mute = slur_render_args(clip)
+        cmd += ["--words", words_path]
+        if mute:                             # slurs bleeped in the first render
+            cmd += ["--mute", ",".join(f"{a:.3f}-{b:.3f}" for a, b in mute)]
     if clip.get("hook"):
         cmd += ["--hook", clip["hook"]]
     crops = CFG.get("layout_crops", {}).get(clip["layout"])
@@ -2658,7 +2662,7 @@ def _caption_step(clip, media, media_dur=None):
         runstate.update_clip(cid, features_json=feats, **cut)
         _log("info", "render", f"clip {cid}: caption words stay select's ({info.get('mode')}: "
              f"{info.get('reason') or info.get('error') or ''})", clip_id=cid)
-        return {**clip, "features_json": feats, **cut}
+        return _censor_slurs({**clip, "features_json": feats, **cut})
     wp = SCRATCH / "words" / f"{clip['source_id']}_{float(clip['start_s']):.2f}_cap.json"
     wp.parent.mkdir(parents=True, exist_ok=True)
     wp.write_text(json.dumps(side))
@@ -2666,7 +2670,69 @@ def _caption_step(clip, media, media_dur=None):
     _log("info", "render", f"clip {cid}: caption words from {info['model']} ({info['mode']}, "
          f"{info['heard_s']}s heard in {info['seconds']}s, {info['captioned']}/{info['words']} "
          f"burned)", clip_id=cid)
-    return {**clip, "words_path": str(wp), "features_json": feats, **cut}
+    return _censor_slurs({**clip, "words_path": str(wp), "features_json": feats, **cut})
+
+
+# ---- RENDER: slurs bleeped in the first render ----
+# A slur said inside the cut used to be burned into the captions and played by the first render.
+# The caption step masks the slurs inside the cut in the sidecar it hands on and keeps their
+# source seconds in features "censor"; recompose_cmd mutes them (--mute).
+
+def _censor_spans(clip):
+    try:
+        feats = json.loads(clip.get("features_json") or "{}") or {}
+    except (TypeError, ValueError):
+        return []
+    return [tuple(map(float, x)) for x in (feats.get("censor") or {}).get("spans") or []]
+
+
+def _sidecar_like(path, words):
+    """`words` in the shape of the sidecar at `path` ([...] or {"words": [...]}), to dump."""
+    try:
+        d = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        d = None
+    return {**d, "words": words} if isinstance(d, dict) else words
+
+
+def _censor_slurs(clip):
+    """The clip with every slur said inside its cut masked in its caption sidecar (in place:
+    the gate reads the masked captions the render burns) and the slurs' source seconds added to
+    features "censor" {"words", "spans"}. Unchanged when it has none."""
+    wp = clip.get("words_path")
+    words = _load_words_sidecar(wp)
+    s, e = float(clip["start_s"]), float(clip["end_s"])
+    masked, rel, found = slurs.censor(words, s, e)
+    if not found:
+        return clip
+    Path(wp).write_text(json.dumps(_sidecar_like(wp, masked)))
+    spans = sorted(set(_censor_spans(clip)) | {(round(a + s, 3), round(b + s, 3)) for a, b in rel})
+    try:
+        prev = int((json.loads(clip.get("features_json") or "{}").get("censor") or {})
+                   .get("words") or 0)
+    except (TypeError, ValueError, AttributeError):
+        prev = 0
+    feats = _features_merge(clip, censor={"words": prev + len(found), "spans": spans})
+    runstate.update_clip(clip["clip_id"], features_json=feats)
+    _log("info", "render", f"clip {clip['clip_id']}: {len(found)} slur(s) masked in the captions, "
+         f"muted at {', '.join(f'{a:.2f}-{b:.2f}s' for a, b in spans)}", clip_id=clip["clip_id"])
+    return {**clip, "features_json": feats}
+
+
+def slur_render_args(clip):
+    """(the words sidecar to burn, [(a, b)] clip-second spans to mute) for recompose_cmd: the
+    spans the caption step kept that fall inside the cut, plus any slur a later rewrite of the
+    sidecar brought back (re-heard captions, a re-cut): that one burns from a masked copy."""
+    wp = clip["words_path"]
+    s, e = float(clip["start_s"]), float(clip["end_s"])
+    spans = [(a - s, b - s) for a, b in _censor_spans(clip) if b > s and a < e]
+    masked, rel, found = slurs.censor(_load_words_sidecar(wp), s, e)
+    if found:
+        cp = Path(wp).with_name(Path(wp).stem + "_censored.json")
+        cp.write_text(json.dumps(_sidecar_like(wp, masked)))
+        wp, spans = str(cp), spans + rel
+    out = sorted({(round(max(0.0, a), 3), round(min(e - s, b), 3)) for a, b in spans if b > 0})
+    return str(wp), [x for x in out if x[1] > x[0]]
 
 
 def _next_alternate(clip, why):
