@@ -65,6 +65,9 @@ NONE_RETRY_SCALES = (0.5, 1 / 3)
 # crop. Nothing in the render can lose a speaker, so a no-face frame is not a failure there;
 # edge-cut faces still fail.
 NO_SPEAKER_LAYOUTS = ("general", "game_only")
+# The speaker crop a talk clip renders as; with no campaign layout its frame gate reads config
+# quality_gate.layouts.track (edge-cut transitions, >= 1 s cutaways)
+PLAIN_TRACK_LAYOUT = "track"
 
 
 
@@ -90,6 +93,7 @@ def _hardcoded_default():
         "gate_head_tol_frames": 0,
         "gate_tail_tol_frames": 0,
         "gate_broll_min_span_s": AUTO_BROLL_MIN_SPAN_S,
+        "gate_cutaway_min_span_s": None,
         "gate_skip_frame_gate": False,
         "gate_exempt_edge_cut_transitions": False,
         "gate_exempt_low_motion_frames": False,
@@ -132,6 +136,7 @@ def layout_params(campaign):
         "head_tol_frames":   int(merged["gate_head_tol_frames"]),
         "tail_tol_frames":   int(merged["gate_tail_tol_frames"]),
         "broll_min_span_s":  float(merged["gate_broll_min_span_s"]),
+        "cutaway_min_span_s": merged.get("gate_cutaway_min_span_s"),
         "skip_frame_gate":   bool(merged.get("gate_skip_frame_gate", False)),
         "exempt_edge_cut_transitions": bool(merged.get("gate_exempt_edge_cut_transitions", False)),
         "exempt_low_motion_frames":    bool(merged.get("gate_exempt_low_motion_frames", False)),
@@ -149,6 +154,7 @@ def _layout_defaults():
         "head_tol_frames":   int(default["gate_head_tol_frames"]),
         "tail_tol_frames":   int(default["gate_tail_tol_frames"]),
         "broll_min_span_s":  float(default["gate_broll_min_span_s"]),
+        "cutaway_min_span_s": default.get("gate_cutaway_min_span_s"),
         "skip_frame_gate":   bool(default.get("gate_skip_frame_gate", False)),
         "exempt_edge_cut_transitions": bool(default.get("gate_exempt_edge_cut_transitions", False)),
         "exempt_low_motion_frames":    bool(default.get("gate_exempt_low_motion_frames", False)),
@@ -211,6 +217,12 @@ def auto_broll_windows(fail_times, min_span=AUTO_BROLL_MIN_SPAN_S, pad=0.2):
     scripts' 1.5 s. Shorter contiguous no-face spans are more likely to be subject-drift
     failures (the camera panned, the crop didn't follow) than true b-roll, so they stay in
     the fail count."""
+    return [(max(0.0, a - pad), b + pad) for (a, b) in _fail_runs(fail_times)
+            if (b - a) >= min_span]
+
+
+def _fail_runs(fail_times):
+    """[[first, last]] clip times of each contiguous run of failing frames."""
     if not fail_times:
         return []
     ft = sorted(fail_times)
@@ -220,7 +232,30 @@ def auto_broll_windows(fail_times, min_span=AUTO_BROLL_MIN_SPAN_S, pad=0.2):
             runs[-1][1] = t
         else:
             runs.append([t, t])
-    return [(max(0.0, a - pad), b + pad) for (a, b) in runs if (b - a) >= min_span]
+    return runs
+
+
+def cutaway_windows(fail_times, times, min_span, pad=0.2):
+    """The no-face spans >= ``min_span`` seconds that lie INSIDE the clip, with a
+    sampled subject frame before and after (a cut away from the speaker and back: a map, a
+    b-roll insert). The b-roll rule takes 3 s, so a 1-2 s insert failed a track clip. A span
+    that opens or closes the clip is a dead opening / closing, never a cutaway. ``fail_times``
+    are the raw failing frames' times, ``times`` every sampled frame's."""
+    if not fail_times or not times:
+        return []
+    lo, hi = min(times), max(times)
+    return [(max(0.0, a - pad), b + pad) for (a, b) in _fail_runs(fail_times)
+            if (b - a) >= min_span and a > lo + 1e-6 and b < hi - 1e-6]
+
+
+def _merge_windows(windows):
+    out = []
+    for a, b in sorted(windows):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
 
 
 # ---------------------------------------------------------------- ffprobe helpers
@@ -725,6 +760,10 @@ def measure_frame_gate(video_path, card_pull_windows=None, fps=FRAME_FPS, params
     # >= broll_min_span_s). Tightened + capped total to AUTO_BROLL_MAX_TOTAL_FRACTION of dur.
     fail_times = [times[i] for i in raw_fails_idx]
     broll = auto_broll_windows(fail_times, min_span=float(params["broll_min_span_s"]), pad=0.2)
+    if params.get("cutaway_min_span_s"):
+        # plain track's shorter cutaways, inside the clip only
+        broll = _merge_windows(broll + cutaway_windows(
+            fail_times, times, float(params["cutaway_min_span_s"]), pad=0.2))
     broll = _cap_broll_total(broll, dur)
     broll_exempt_idx = {i for i, t in enumerate(times) if any(a <= t <= b for (a, b) in broll)}
 
@@ -3499,6 +3538,7 @@ def gate(video_path, *, plan=None, clip_meta=None, campaign=None, words=None,
     speaker-less (``NO_SPEAKER_LAYOUTS``) and no campaign layout is configured, the frame gate
     drops the face-presence rule and only fails edge-cut faces. A campaign that names a layout
     (full_bleed_speaker, podcast_two_shot, ...) always keeps the full rule, whatever rendered.
+    A ``track`` render with no campaign layout reads the ``layouts.track`` row.
 
     Any measure that cannot run on the inputs stays as ``{"passed": null, "reason": "..."}``
     and does NOT cause a fail — it is informational. The gate only fails on an explicit False
@@ -3525,6 +3565,11 @@ def gate(video_path, *, plan=None, clip_meta=None, campaign=None, words=None,
     lp = layout_params(campaign)
     if rendered_layout in NO_SPEAKER_LAYOUTS and not lp.get("layout_name"):
         lp = {**lp, "require_subject": False, "rendered_layout": rendered_layout}
+    elif rendered_layout == PLAIN_TRACK_LAYOUT and not lp.get("layout_name"):
+        # a track render with no campaign layout reads the layouts.track row (its smart
+        # measures)
+        lp = {**layout_params({"layout": {"layout": PLAIN_TRACK_LAYOUT}}),
+              "rendered_layout": rendered_layout}
     try:
         report["frame_gate"] = measure_frame_gate(video_path, card_pull_windows=card_wins,
                                                   params=lp)

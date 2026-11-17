@@ -77,10 +77,11 @@
  "quality_gate": {
   "_doc": "Gate thresholds. Every numeric value is the same across layouts; what differs is which measures a layout opts into (exempt_edge_cut_transitions, exempt_low_motion_frames, skip_frame_gate, exempt_head_tail_track_carry). The gate rejects any clip that fails after exemptions, never by raising a cap. See quality_gate.measure_frame_gate.",
   "default": {
-   "_fail_pct_doc": "At 2.0 the frame gate rejected clips whose face was out of frame for 2.5-7 % of frames (well under a second of a cutaway or a head turn); 8.0 keeps those. The first/last-second rule (head/tail tolerance 0) still fails a clip that opens or closes off the face.",
+   "_fail_pct_doc": "At 2.0 the frame gate rejected clips whose face was out of frame for 2.5-7 % of frames (well under a second of a cutaway or a head turn); 8.0 keeps those. The first/last-second rule (head/tail tolerance below) still fails a clip that opens or closes off the face.",
    "gate_fail_pct_max": 8.0,
-   "gate_head_tol_frames": 0,
-   "gate_tail_tol_frames": 0,
+   "_head_tail_tol_doc": "3 frames (0.3 s at the gate's 10 fps): at 0, one frame with no face in the first or last second failed the clip (a shot change landing on the cut frame, a single missed detection). A longer dead opening or closing still fails.",
+   "gate_head_tol_frames": 3,
+   "gate_tail_tol_frames": 3,
    "gate_broll_min_span_s": 3.0,
    "gate_skip_frame_gate": false,
    "gate_exempt_edge_cut_transitions": false,
@@ -108,7 +109,9 @@
   },
   "layouts": {
    "track": {
-    "note": "default: strict. Face fully inside on >= the frame-gate share of frames, 0 fails in the first/last 1 s."
+    "gate_exempt_edge_cut_transitions": true,
+    "gate_cutaway_min_span_s": 1.0,
+    "note": "The default thresholds, plus two smart measures: the edge-cut transition exemption (a pan between speakers, bounded by face anchors; podcast_two_shot's rule) and cutaways of >= 1 s inside the clip, bounded by face frames on both sides (the b-roll rule takes 3 s, so a map or b-roll insert under 3 s failed a track clip). A no-face span that opens or closes the clip is not a cutaway. A clip rendered as track with no campaign layout reads this row (quality_gate.gate)."
    },
    "full_bleed_speaker": {
     "note": "Handheld / single-speaker: the same strict thresholds as track. No smart exemptions: a drifting subject is a hard fail."
