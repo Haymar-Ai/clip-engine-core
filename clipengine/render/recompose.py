@@ -5385,16 +5385,20 @@ def main(argv=None):
                 # captions sit just under the seam, clear of the full frame's graphics
                 fg_h = int(plan["seam_y"])
             text_avoid = None
+            hook, hook_info, hook_why = a.hook, {}, None
             if a.hook:
                 # the hook must clear on-screen source text/UI
                 tz = textzones.hook_zone_text(src, a.start, a.dur, vgraph)
                 if not tz["frames"]:
-                    raise RenderError("hook placement: the hook-zone text scan read no frames")
-                plan["hook_text"] = tz
-                text_avoid = tz["bands"]
-                if layout == DUAL_VIEW:
-                    # the hook stays in the header: never over the frame's graphics or the zoom
-                    text_avoid = list(text_avoid) + [(int(plan["header_h"]), OUT_H)]
+                    # never a refusal for the hook: no text read -> no hook
+                    hook, hook_why = None, "the hook-zone text scan read no frames"
+                else:
+                    plan["hook_text"] = tz
+                    text_avoid = tz["bands"]
+                    if layout == DUAL_VIEW:
+                        # the hook stays in the header: never over the frame's graphics or the
+                        # zoom
+                        text_avoid = list(text_avoid) + [(int(plan["header_h"]), OUT_H)]
             cap_y = None
             if a.caption_zone == "auto":
                 # the caption band moves to the rows the
@@ -5415,13 +5419,18 @@ def main(argv=None):
             if plan.get("header") and plan["header"][1] > 0:
                 # v3: the hook on the header above the band, for the whole clip
                 hook_box = tuple(plan["header"])
-            try:
-                captions.build_ass(words, tmp / "captions.ass", style=a.caption_style,
-                                   hook=a.hook, layout=layout, dur=a.dur, fg_h=fg_h,
-                                   avoid=hook_avoid(plan), text_avoid=text_avoid, cap_y=cap_y,
-                                   hook_box=hook_box)
-            except captions.HookPlacementError as e:
-                raise RenderError(f"hook placement: {e}")
+            # the hook falls back (one line, smaller, plate, none), never refuses
+            captions.build_ass(words, tmp / "captions.ass", style=a.caption_style,
+                               hook=hook, layout=layout, dur=a.dur, fg_h=fg_h,
+                               avoid=hook_avoid(plan), text_avoid=text_avoid, cap_y=cap_y,
+                               hook_box=hook_box, hook_info=hook_info)
+            if hook_why:
+                hook_info = {"fallback": "none", "why": hook_why}
+            if hook_info.get("fallback"):
+                plan["hook_fallback"] = {k: v for k, v in hook_info.items() if k != "plate"}
+                log(f"hook placement fallback: {hook_info['fallback']} ("
+                    + (hook_info.get("why") or f"the first choice covered "
+                       f"{hook_info.get('covered_px')}px of on-screen text") + ")")
             ass_name = "captions.ass"   # ffmpeg runs in tmp: no filtergraph path escaping
 
         if a.emit_plan:
@@ -5500,6 +5509,8 @@ def main(argv=None):
                                    if k in guard}
         if plan.get("hook_text"):
             rep["hook_text_bands"] = plan["hook_text"]["bands"]
+        if plan.get("hook_fallback"):
+            rep["hook_fallback"] = plan["hook_fallback"]
         if plan.get("caption_zone"):
             rep["caption_y"] = plan["caption_zone"]["y"]
             rep["caption_zone"] = plan["caption_zone"]

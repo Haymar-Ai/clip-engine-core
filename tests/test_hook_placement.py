@@ -59,14 +59,26 @@ def test_source_text_outranks_faces():
     assert top >= 590                                  # on the face rather than on the text
 
 
-def test_no_clear_band_rejects():
-    with pytest.raises(captions.HookPlacementError, match="clears the on-screen text"):
-        captions.hook_event("Why I bet against the crowd", dur=9,
-                            text_avoid=[(200, 700), (700, 1300)])
-    with pytest.raises(captions.HookPlacementError):     # general: hook sits in the top band
-        captions.hook_event("Big hook", layout="general", dur=9, text_avoid=[(250, 400)])
+def test_no_clear_band_falls_back_never_raises():
+    # no clear position is no refusal: no hook rather than one on the text
+    info = {}
+    line, _ = captions.hook_event("Why I bet against the crowd", dur=9, info=info,
+                                  text_avoid=[(200, 700), (700, 1300)])
+    assert line is None and info["fallback"] == "none" and info["covered_px"] > 0
+    # general: the hook sits in the top band (0-656); room left under a ticker -> one line
+    # there; text filling the band -> a plate behind the hook
+    info = {}
+    line, _ = captions.hook_event("Big hook", layout="general", dur=9, info=info,
+                                  text_avoid=[(250, 400)])
+    assert line and info["fallback"] == "one_line" and info["plate"] is None
+    info = {}
+    line, _ = captions.hook_event("Big hook", layout="general", dur=9, info=info,
+                                  text_avoid=[(100, 600)])
+    assert line and info["fallback"] == "plate" and "\\p1" in info["plate"]
     # no text bands -> the old behaviour, unchanged
-    assert captions.hook_event("Big hook", dur=9, text_avoid=[])[0]
+    info = {}
+    assert captions.hook_event("Big hook", dur=9, text_avoid=[], info=info)[0]
+    assert info["fallback"] is None and info["plate"] is None
 
 
 def test_tesseract_tsv_keeps_confident_words_only():
@@ -410,15 +422,34 @@ def media(tmp_path_factory):
     return p
 
 
-def test_hook_on_text_rejects_the_render(media, tmp_path, monkeypatch, capsys):
+def test_hook_on_text_never_refuses_the_render(media, tmp_path, monkeypatch, capsys):
+    # text everywhere used to refuse the render; the hook now sits on a plate in
+    # the general top band and the QC says so
     monkeypatch.setattr(textzones, "hook_zone_text",
                         lambda *a, **k: {"bands": [(0, PH)], "frames": 7, "ocr": True,
                                          "words": ["$7,811.350"]})
     out = tmp_path / "clip.mp4"
     rc = recompose.main([str(media), "0", "2", str(out), "--layout", "general",
                          "--hook", "Why I bet against the crowd"])
-    assert rc == 1 and not out.exists()
-    assert "hook placement" in capsys.readouterr().err
+    std = capsys.readouterr()
+    assert rc == 0 and out.exists()
+    rep = json.loads(std.out.strip().splitlines()[-1][3:])
+    assert rep["hook_fallback"]["fallback"] == "plate" and rep["hook_fallback"]["covered_px"] > 0
+    assert "hook placement fallback: plate" in std.err
+
+
+def test_hook_zone_scan_with_no_frames_renders_without_the_hook(media, tmp_path, monkeypatch,
+                                                                 capsys):
+    monkeypatch.setattr(textzones, "hook_zone_text",
+                        lambda *a, **k: {"bands": [], "frames": 0, "ocr": True, "words": []})
+    out = tmp_path / "clip.mp4"
+    rc = recompose.main([str(media), "0", "2", str(out), "--layout", "general",
+                         "--hook", "Why I bet against the crowd"])
+    std = capsys.readouterr()
+    assert rc == 0 and out.exists()
+    rep = json.loads(std.out.strip().splitlines()[-1][3:])
+    assert rep["hook_fallback"] == {"fallback": "none",
+                                    "why": "the hook-zone text scan read no frames"}
 
 
 def test_qc_reports_blur_fill_and_hook_bands(media, tmp_path, capsys):

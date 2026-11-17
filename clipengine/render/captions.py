@@ -10,11 +10,13 @@ Canvas is 1080x1920. Everything stays out of the platform UI zones:
             hook) in the caption highlight yellow, max 3 lines; the fewest, widest
             lines at a readable size (wider than the captions), then the biggest size. On screen for HOOK_HOLD seconds,
             then fades. Placed in the free vertical space between the top UI band and the
-            captions that stays clear of the on-screen source text/UI (`text_avoid`, a hard
-            rule: no clear position raises HookPlacementError) and then of the faces the
-            reframe saw (`avoid`); centred in the top blurred band for `general`.
+            captions that stays clear of the on-screen source text/UI (`text_avoid`) and then
+            of the faces the reframe saw (`avoid`); centred in the top blurred band for
+            `general`. No clear position: one line, a smaller size, a plate (header / top
+            band), no hook, in that order; never a refusal.
 Widths are measured with the real font (PIL getlength), not a per-character guess.
 """
+import math
 import os
 import re
 from pathlib import Path
@@ -399,7 +401,8 @@ def caption_events(words, style="opus", layout="track", dur=None, fg_h=None, cap
 
 
 class HookPlacementError(ValueError):
-    """No hook position clears the on-screen text/UI the source shows while the hook is up."""
+    """No hook position clears the on-screen text/UI the source shows while the hook is up.
+    Not raised any more (hook_event falls back instead); kept for importers."""
 
 
 def band_overlap(y, block_h, bands, pad):
@@ -432,65 +435,142 @@ def _hook_line(line):
                     if any(c.isdigit() for c in w) else escape(w) for w in line.split(" "))
 
 
+GENERAL_BAND_PAD = 20    # general: the hook block keeps this much of the top band clear each side
+HOOK_ZONE_STEP = 2       # a hook on a header / top band tries every other row of it
+HOOK_PLATE_PAD = 14      # a plate reaches this far past the hook block each side
+HOOK_PLATE_COLOUR = "&H101010&"
+HOOK_PLATE_ALPHA = "&H30&"   # ASS alpha (00 = opaque): the source text under the plate is gone
+
+
+def _inside(bands, zone):
+    """The parts of the y-bands inside `zone` (y0, y1): the only text a hook on it can cover."""
+    z0, z1 = zone
+    return [(max(a, z0), min(b, z1)) for a, b in bands or () if min(b, z1) > max(a, z0)]
+
+
+def _fallbacks(text, max_lines):
+    """The (lines, size) a hook that covers text tries, in order: one line at the
+    largest size it fits, then every size from the largest down (the fewest lines at each)."""
+    return hook_fits(text, max_lines=1)[:1] + hook_fits(text, max_lines=max_lines)
+
+
+def _zone_y(block_h, zone, pad, bands):
+    """The centre row nearest the zone's middle where a `block_h` block (`pad` of the zone clear
+    each side) covers none of `bands`, or None."""
+    z0, z1 = zone
+    lo, hi = math.ceil(z0 + pad + block_h / 2), math.floor(z1 - pad - block_h / 2)
+    mid = (z0 + z1) / 2
+    ys = sorted(range(lo, hi + 1, HOOK_ZONE_STEP), key=lambda y: (abs(y - mid), y))
+    return next((y for y in ys if not band_overlap(y, block_h, bands, TEXT_PAD)), None)
+
+
+def _plate_event(lines, size, y, end, fade_out, zone):
+    """A dark box behind the hook block, inside the zone and off the frame's side edges (a
+    full-width box would read as a flat edge band)."""
+    block_h = len(lines) * size * HOOK_LINE_H
+    w = max(hook_width(l, size) for l in lines) + 2 * (HOOK_OUTLINE + HOOK_PLATE_PAD)
+    x0 = int(max(HOOK_MARGIN - HOOK_PLATE_PAD, (PLAY_W - w) / 2))
+    y0 = int(max(zone[0] + HOOK_BOX_PAD / 2, y - block_h / 2 - HOOK_PLATE_PAD))
+    y1 = int(min(zone[1] - HOOK_BOX_PAD / 2, y + block_h / 2 + HOOK_PLATE_PAD))
+    pw, ph = PLAY_W - 2 * x0, y1 - y0
+    tags = (f"\\an7\\pos({x0},{y0})\\p1\\bord0\\shad0\\1c{HOOK_PLATE_COLOUR}"
+            f"\\1a{HOOK_PLATE_ALPHA}\\fad({HOOK_FADE_IN_MS},{fade_out})")
+    return (f"Dialogue: 0,0:00:00.00,{fmt_time(end)},Hook,,0,0,0,,{{{tags}}}"
+            f"m 0 0 l {pw} 0 {pw} {ph} 0 {ph}{{\\p0}}")
+
+
 def hook_event(hook, layout="track", dur=None, fg_h=None, avoid=None, text_avoid=None,
-               cap_y=None, box=None):
-    """(Dialogue line, font size) for the hook title, or (None, HOOK_SIZES[0]).
-    `text_avoid`: canvas y-bands holding source text/UI while the hook is up; a hook that
-    cannot clear them raises HookPlacementError (the caller rejects the clip). `box` = (y0, y1):
-    a header the hook sits on, centred, for the whole clip (gamestack v3)."""
+               cap_y=None, box=None, info=None):
+    """(Dialogue line, font size) for the hook title, or (None, size).
+    `text_avoid`: canvas y-bands holding source text/UI while the hook is up. `box` = (y0, y1):
+    a header the hook sits on, centred, for the whole clip (gamestack v3).
+    Never raises for placement: on a header (or the general top band) only the text
+    inside it counts; a hook that still covers text falls back, in order, to one line, a smaller
+    size, a plate behind the hook (header / top band only), no hook. `info` (a dict) gets
+    {"fallback": None | "one_line" | "smaller" | "plate" | "none", "covered_px", "plate"}; the
+    plate is a Dialogue line of its own (build_ass writes it under the hook)."""
+    info = {} if info is None else info
+    info.update(fallback=None, covered_px=0, plate=None)
     if not hook or not " ".join(str(hook).split()):
         return None, HOOK_SIZES[0]
     text = " ".join(str(hook).split()).upper()
     fade_out = HOOK_FADE_OUT_MS
     end = HOOK_HOLD + HOOK_FADE_OUT_MS / 1000
+    zone = bottom = None
     if box is not None:
-        room = (int(box[1]) - int(box[0])) - 2 * HOOK_BOX_PAD
-        fits = [f for f in hook_fits(text, max_lines=HOOK_BOX_LINES)
+        zone, pad, max_lines = (int(box[0]), int(box[1])), HOOK_BOX_PAD, HOOK_BOX_LINES
+        room = (zone[1] - zone[0]) - 2 * pad
+        fits = [f for f in hook_fits(text, max_lines=max_lines)
                 if len(f[0]) * f[1] * HOOK_LINE_H <= room]
-        lines, size = fits[0] if fits else wrap_hook(text, max_lines=HOOK_BOX_LINES)
-        y = int(round((int(box[0]) + int(box[1])) / 2.0))
-        hit = band_overlap(y, len(lines) * size * HOOK_LINE_H, text_avoid, TEXT_PAD)
+        lines, size = fits[0] if fits else wrap_hook(text, max_lines=max_lines)
+        y = int(round((zone[0] + zone[1]) / 2.0))
         fade_out, end = 0, (float(dur) if dur else end)
     elif layout == "general":
         band = (PLAY_H - (fg_h or GENERAL_FG_H)) / 2
-        fits = [f for f in hook_fits(text) if len(f[0]) * f[1] * HOOK_LINE_H <= band - 40]
+        zone, pad, max_lines = (0, int(band)), GENERAL_BAND_PAD, HOOK_MAX_LINES
+        room = band - 2 * pad
+        fits = [f for f in hook_fits(text) if len(f[0]) * f[1] * HOOK_LINE_H <= room]
         lines, size = fits[0] if fits else wrap_hook(text)
         y = int(round(band / 2))
-        hit = band_overlap(y, len(lines) * size * HOOK_LINE_H, text_avoid, TEXT_PAD)
     else:
         # clear of source text first, then of faces; then the fewest (widest) lines at a
         # readable size; then biggest
+        max_lines = HOOK_MAX_LINES
         bottom = (int(cap_y) if cap_y is not None else caption_y(layout, fg_h)) - CAPTION_CLEAR
         opts = []
         for l, sz in (hook_fits(text) or [wrap_hook(text)]):
             block_h = len(l) * sz * HOOK_LINE_H
             y, face = place_hook(block_h, avoid, bottom=bottom, text_avoid=text_avoid)
             opts.append((l, sz, y, face, band_overlap(y, block_h, text_avoid, TEXT_PAD)))
-        lines, size, y, _, hit = min(opts, key=lambda o: (o[4] > 0, o[4], o[3] > 0, o[3],
-                                                          o[1] < HOOK_WIDE_MIN, len(o[0]),
-                                                          -o[1]))
+        lines, size, y, _, _hit = min(opts, key=lambda o: (o[4] > 0, o[4], o[3] > 0, o[3],
+                                                           o[1] < HOOK_WIDE_MIN, len(o[0]),
+                                                           -o[1]))
+    bands = text_avoid if zone is None else _inside(text_avoid, zone)
+    hit = band_overlap(y, len(lines) * size * HOOK_LINE_H, bands, TEXT_PAD)
     if hit > 0:
-        raise HookPlacementError(f"no hook position clears the on-screen text: best y={y} "
-                                 f"still covers {hit:.0f}px of text bands "
-                                 f"{[(int(a), int(b)) for a, b in text_avoid]}")
+        info["covered_px"] = int(round(hit))
+        alt = None
+        for k, (l, sz) in enumerate(_fallbacks(text, max_lines)):
+            block_h = len(l) * sz * HOOK_LINE_H
+            if zone is not None:
+                ay = _zone_y(block_h, zone, pad, bands)
+            else:
+                ay = place_hook(block_h, avoid, bottom=bottom, text_avoid=text_avoid)[0]
+                ay = None if band_overlap(ay, block_h, text_avoid, TEXT_PAD) else ay
+            if ay is not None:
+                alt = (l, sz, ay, "one_line" if k == 0 and len(l) == 1 else "smaller")
+                break
+        if alt:
+            lines, size, y, info["fallback"] = alt
+        elif zone is not None and len(lines) * size * HOOK_LINE_H <= room:
+            info["fallback"] = "plate"
+        else:
+            info["fallback"] = "none"
+            return None, size
     if dur:
         end = min(end, float(dur))
+    if info["fallback"] == "plate":
+        info["plate"] = _plate_event(lines, size, y, end, fade_out, zone)
     tags = f"\\an5\\pos({PLAY_W // 2},{y})\\fad({HOOK_FADE_IN_MS},{fade_out})"
     body = "\\N".join(_hook_line(l) for l in lines)
     return f"Dialogue: 1,0:00:00.00,{fmt_time(end)},Hook,,0,0,0,,{{{tags}}}{body}", size
 
 
 def build_ass(words, out_path, style="opus", hook=None, layout="track", dur=None, fg_h=None,
-              avoid=None, text_avoid=None, cap_y=None, hook_box=None):
+              avoid=None, text_avoid=None, cap_y=None, hook_box=None, hook_info=None):
     """Write the ASS file (captions from clip-relative words + optional hook) and return it.
     `avoid`: output-canvas y-bands [(y0, y1)] the hook should stay clear of (faces).
-    `text_avoid`: y-bands of on-screen source text/UI the hook must clear (HookPlacementError).
+    `text_avoid`: y-bands of on-screen source text/UI the hook must clear (hook_event falls
+    back when it cannot; `hook_info`, a dict, gets how).
     `cap_y`: the captions' centre line when moved off on-screen text.
     `hook_box`: (y0, y1) header rows the hook sits on for the whole clip (gamestack v3)."""
     p = STYLES.get(style, STYLES["opus"])
+    info = {} if hook_info is None else hook_info
     hook_line, hook_size = hook_event(hook, layout, dur, fg_h, avoid, text_avoid, cap_y=cap_y,
-                                      box=hook_box)
+                                      box=hook_box, info=info)
     events = caption_events(words, style, layout, dur, fg_h, cap_y=cap_y)
+    if info.get("plate"):
+        events.append(info["plate"])
     if hook_line:
         events.append(hook_line)
     out = Path(out_path)
