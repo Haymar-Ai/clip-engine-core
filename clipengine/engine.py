@@ -1203,6 +1203,8 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
       - layout_sanity: trust render QC's `layout` matches the expected stream layout
       - gameplay_layout: a gameplay clip (gameplay_clip) rendered as a face-follow crop (track,
         split, ...) fails
+      - cam_inset: a stream / gaming clip from a source with a streamer cam rendered with no cam
+        inset (render QC's `cam_inset`) fails
       - visual_quality: median luma / contrast / sharpness + blur-fill share
       - (quality_gate.clip_checks, same as the full gate): flat edge band,
         graphics sliced by the crop, captions vs a second ASR, hook grounding (no hook =
@@ -1228,6 +1230,8 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
     # gameplay never ships a face-follow crop (track round the cam)
     report["gameplay_layout"] = quality_gate.measure_gameplay_layout(
         gameplay_clip(clip), qc.get("layout"), (qc.get("banner_guard") or {}).get("action"))
+    # a stream / gaming clip from a source with a cam shows it as an inset
+    report["cam_inset"] = quality_gate.measure_cam_inset(_vertical_of(clip), qc.get("cam_inset"))
     # brightness / contrast / sharpness / blur-fill on the pixels
     try:
         report["visual_quality"] = quality_gate.measure_visual_quality(
@@ -1242,7 +1246,7 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
     # Collapse to a single verdict (a failed caption check is a warning: Amendment 1).
     reasons = []
     for k in ("duration_bounds", "audio_lufs", "caption_presence", "black_frozen",
-              "gameplay_layout", "visual_quality") + quality_gate.CLIP_CHECK_KEYS:
+              "gameplay_layout", "cam_inset", "visual_quality") + quality_gate.CLIP_CHECK_KEYS:
         if k in NON_REJECTING_GATE_KEYS:
             continue
         m = report.get(k) or {}
@@ -1428,6 +1432,14 @@ def _content_kind_of(source_id):
         if row and row.get("niche"):
             return source_kind(row.get("title"))
     return None
+
+
+def _vertical_of(clip, src=None):
+    """The vertical of a clip's source (its stored source row), None when unknown."""
+    sid = (src or {}).get("source_id") or clip.get("source_id")
+    if src is None:
+        src = (runstate.source(sid) if sid else None) or {}
+    return src.get("vertical")
 
 
 def gameplay_clip(clip, src=None):

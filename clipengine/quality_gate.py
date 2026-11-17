@@ -1842,6 +1842,35 @@ def measure_gameplay_layout(gameplay, rendered_layout, guard_action=None):
     return {"passed": True, "layout": rendered_layout}
 
 
+# ---------------------------------------------------------------- measurement: the streamer cam
+
+# A stream / gaming clip whose source has a streamer cam shows it as an inset in a bottom corner of
+# the frame. The render (recompose.keep_cam) reports the source's cam and the inset it drew in its
+# QC line ("cam_inset"); a stream / gaming clip from a source with a cam rendered without an inset
+# fails (code cam_missing), so it is never shipped silently.
+CAM_VERTICALS = ("stream", "gaming")
+
+
+def measure_cam_inset(vertical, cam_qc):
+    """The cam check of a stream / gaming clip: fails when its source has a streamer cam
+    (cam_qc["source_cam"]) and the render drew no inset (cam_qc["inset"]). Unmeasured (passed None)
+    outside the verticals, with no cam report (an older render) or when the render could not
+    check; passes a source with no cam (game only) and a speaker crop (the person is the picture)."""
+    if (vertical or "").lower() not in CAM_VERTICALS:
+        return {"passed": None, "reason": "not a stream / gaming clip"}
+    if not isinstance(cam_qc, dict) or not cam_qc.get("rule"):
+        return {"passed": None, "reason": "no cam report from the render"}
+    if cam_qc.get("error"):
+        return {"passed": None, "reason": f"the render's cam check failed: {cam_qc['error']}"}
+    out = {k: cam_qc.get(k) for k in ("source_cam", "inset", "corner", "area", "width", "over",
+                                       "how", "layout", "cap_clear") if k in cam_qc}
+    if cam_qc.get("source_cam") and not cam_qc.get("inset"):
+        return dict(out, passed=False, errors=[
+            f"cam_missing: the source has a streamer cam {cam_qc['source_cam']} and the "
+            f"{cam_qc.get('layout')} render shows no cam inset ({cam_qc.get('why') or 'dropped'})"])
+    return dict(out, passed=True, reason=cam_qc.get("why"))
+
+
 # ---------------------------------------------------------------- measurement: layout quality
 
 CHART_TOP_H = 1312                     # must match render.recompose/reframe BROADCAST_TOP_H

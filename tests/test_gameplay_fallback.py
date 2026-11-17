@@ -165,14 +165,17 @@ def test_mid_frame_cam_centred_is_painted_out_of_the_band_and_kept_on_the_card(t
 
 
 def test_mid_frame_cam_no_gamestack_band_takes_is_game_only_clear_of_it(tmp_path, monkeypatch):
-    """A cam no 48 % band avoids and (cap 0) none may paint out: game only (no card), its 0.42
-    band clear of the cam."""
+    """A cam no 48 % band avoids and (cap 0) none may paint out: game only's 0.42 band clear of
+    the cam. A stream / gaming clip keeps the cam as the inset on that band (it had no card:
+    tests/test_stream_cam_always_on.py path a)."""
     src = _source(tmp_path / "s.mp4", PART_LEFT, _face_of(PART_LEFT))
     _rig(monkeypatch, PART_LEFT, _face_of(PART_LEFT))
     _no_face_crop(monkeypatch)
     monkeypatch.setattr(recompose, "MID_CAM_MASK_MAX", 0.0)
     plan = recompose.plan_layout(_args(src), src)
-    assert plan["layout"] == "game_only" and plan["card"] is None and plan["v2"]
+    assert plan["layout"] == "gamestack" and plan["card"] and plan["v2"]
+    assert plan["band"]["share"] < gl.MIN_SHARE                   # game only's band
+    assert gl.inset_ok(plan["card"])
     assert plan["cam_mid"] and plan["cam_mask"] is None
     assert all(w[2] <= PART_LEFT[0] for w in _band_windows(plan))
 

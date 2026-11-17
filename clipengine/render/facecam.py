@@ -1042,6 +1042,40 @@ def detect_multiwindow(src, source_duration=None, span_s=MULTIWIN_SPAN_S, n=MULT
     return r
 
 
+SOURCE_SPANS = 4           # detect_source: spans beyond the middle one on a source this many
+                           # times longer than a span
+
+
+def source_spans(dur, span_s=MULTIWIN_SPAN_S, spans=SOURCE_SPANS):
+    """[(start, length)] source seconds detect_source reads: the middle span (detect_multiwindow's),
+    then `spans` more spread evenly over a source longer than 1.5 spans."""
+    dur = float(dur)
+    window = min(dur, float(span_s))
+    out = [(max(0.0, (dur - window) / 2.0), window)]
+    if dur > 1.5 * window:
+        for i in range(int(spans)):
+            s = min(max(0.0, (i + 0.5) * dur / spans - window / 2.0), dur - window)
+            if all(abs(s - o[0]) >= window / 2.0 for o in out):
+                out.append((s, window))
+    return out
+
+
+def detect_source(src, source_duration=None, span_s=MULTIWIN_SPAN_S, n=MULTIWIN_N, mode="auto",
+                  max_face_h=MAX_FACE_H, accept=None):
+    """The streamer cam anywhere in the source (detect() on source_spans): the first
+    result whose face is in its box in >= `accept` (FACE_ACCEPT) of the span's samples, with
+    "span" = (start, length); None when no span shows one (the source has no cam)."""
+    dur = float(source_duration) if source_duration else _probe_duration(src)
+    if dur <= 0:
+        return None
+    accept = FACE_ACCEPT if accept is None else accept
+    for start, window in source_spans(dur, span_s):
+        r = detect(src, start, window, n=n, mode=mode, max_face_h=max_face_h)
+        if r is not None and r["face_frac"] >= accept:
+            return dict(r, span=[round(start, 3), round(window, 3)])
+    return None
+
+
 # ---------------------------------------------------------------- profile IO
 
 def verify_box(src, start, dur, box_norm, n=15, max_face_h=MAX_FACE_H):

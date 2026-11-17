@@ -24,7 +24,9 @@ Codes (one per defect). `fix` names the kind of repair that fixes it; None = not
   cover_frame_layout         the first frames / cover are another layout     -> not fixable
   gameplay_face_follow       gameplay rendered as a face-follow crop (track: -> not fixable
                              the game cropped tight round the cam)
-  too_dark                   visual quality: too dark                        -> levels
+  cam_missing                a stream / gaming clip from a source with a      -> not fixable
+                             streamer cam rendered with no cam inset
+  too_dark                 visual quality: too dark                        -> levels
   av_sync / loudness         encode faults                                   -> rerender
   render_timeout             a time cap killed the render                    -> rerender
   other                      a reason no rule recognises                     -> not fixable
@@ -64,6 +66,9 @@ CODES = {
     # gameplay never ships a face-follow crop (the gate's gameplay_layout)
     "gameplay_face_follow": (None, "gameplay rendered as a face-follow crop (the game cropped "
                                    "tight)"),
+    # a stream / gaming clip from a source with a cam shows it in a bottom corner
+    "cam_missing": (None, "the source's streamer cam missing from a stream / gaming clip (no "
+                          "cam inset)"),
     "too_dark": (LEVELS, "too dark"),
     "av_sync": (RERENDER, "audio / video out of sync"),
     "loudness": (RERENDER, "loudness off target"),
@@ -138,6 +143,8 @@ _RULES = [
     # ceiling" (an IRL clip) is no gameplay reject
     ("gameplay_face_follow", r"\bgameplay_layout\b"
                              r"|\bgameplay (?:rendered|planned) as '\w+', a face-follow crop\b"),
+    # the gate's own words only (quality_gate.measure_cam_inset)
+    ("cam_missing", r"\bcam_missing\b|\bcam_inset\b"),
     ("too_dark", r"\btoo dark\b"),
     ("av_sync", r"\bav_sync\b|\ba/v (?:sync|drift)\b"),
     ("loudness", r"\bloudness\b|\blufs\b"),
@@ -205,6 +212,8 @@ def codes_from_gate_report(report):
             add("cover_frame_layout", f"cover_frame: {e}")
         elif key == "gameplay_layout":
             add("gameplay_face_follow", f"gameplay_layout: {e}")
+        elif key == "cam_inset":
+            add("cam_missing", f"cam_inset: {e}")
         elif key == "kept_face_speaker":
             add("wrong_speaker", f"kept_face_speaker: {e}")
         elif key == "visual_quality":

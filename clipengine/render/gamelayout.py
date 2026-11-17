@@ -335,22 +335,56 @@ def overlay_rect(frames, face):
     return [x0 + x0 % 2, y0 + y0 % 2, x1 - x1 % 2, y1 - y1 % 2]
 
 
-def snap_to_rect(box, rect, face, src_w, src_h):
+def snap_to_rect(box, rect, face, src_w, src_h, keep=None):
     """The cam box with its sides toward the frame centre (right / bottom for a top-left cam)
     moved to the overlay rect's borders: there a grown or head-and-shoulders box runs into the
     game (2500's calm box reached 80 px past the cam) or stops short of the cam's edge. The sides
     toward the frame edges keep the box's (the rect can take a static room edge for a border
-    there: 3172's would cut the streamer's hair)."""
+    there: 3172's would cut the streamer's hair). `keep` ({"x0".."y1": line}, border_sides): a
+    side already on the overlay's own border goes to that line, not to the rect's."""
     x0, y0, x1, y1 = (int(v) for v in box)
+    keep = keep or {}
     if face[0] < src_w / 2.0:
-        x1 = int(rect[2])
+        x1 = int(keep.get("x1", rect[2]))
     else:
-        x0 = int(rect[0])
+        x0 = int(keep.get("x0", rect[0]))
     if face[1] < src_h / 2.0:
-        y1 = int(rect[3])
+        y1 = int(keep.get("y1", rect[3]))
     else:
-        y0 = int(rect[1])
+        y0 = int(keep.get("y0", rect[1]))
     return [x0, y0, x1, y1] if x1 - x0 >= 20 and y1 - y0 >= 20 else [int(v) for v in box]
+
+
+SNAP_KEEP_PX = 8           # a box side with the overlay's border this close is on the cam's edge
+
+
+def border_sides(frames, box, face):
+    """{side: line} (src px, off the border line as overlay_rect's) of the box's sides toward the
+    frame centre that already sit on the overlay's own border: a straight colour step within
+    SNAP_KEEP_PX of the side along the face's rows / columns (_border's rule). A room cam's wall
+    edge 0.5 face heights from the face was read by overlay_rect as the cam's border, and the snap
+    cut the card to half the cam; the busy box's side was on the cam's real edge (a 13-30 step
+    against a median of 2)."""
+    if not frames or not face:
+        return {}
+    H, W = frames[0].shape[:2]
+    cx, cy, fh = (float(v) for v in face)
+    rows = (max(0, int(cy - RECT_SPAN * fh)), min(H, int(cy + RECT_SPAN * fh)))
+    cols = (max(0, int(cx - RECT_SPAN * fh)), min(W, int(cx + RECT_SPAN * fh)))
+    x0, y0, x1, y1 = (int(v) for v in box)
+    out = {}
+    for name, axis, line, span, lim in (("x1" if cx < W / 2.0 else "x0", "x",
+                                         x1 if cx < W / 2.0 else x0, rows, W - 1),
+                                        ("y1" if cy < H / 2.0 else "y0", "y",
+                                         y1 if cy < H / 2.0 else y0, cols, H - 1)):
+        if line <= 1 or line >= lim:
+            continue                            # the side is the frame edge
+        b = _border(_step_profile(frames, axis, max(1, line - SNAP_KEEP_PX),
+                                  min(lim, line + SNAP_KEEP_PX + 1), span))
+        if b is not None:
+            v = b - 2 if name in ("x1", "y1") else b + 2
+            out[name] = v - v % 2 if name in ("x1", "y1") else v + v % 2
+    return out
 
 
 # A gameplay cam burned in mid-frame (no frame edge). Its overlay rect (all four borders read
@@ -398,6 +432,120 @@ def cover_share(part, windows):
         if iw > 0 and ih > 0:
             best = max(best, iw * ih / area)
     return round(best, 3)
+
+
+# ---------------------------------------------------------------- the cam inset
+
+# A stream / gaming clip whose source has a streamer cam always shows it, as an inset in a bottom
+# corner: the v3 card under the band when it fits these bounds, else the inset overlaid on the
+# frame's bottom corner (never dropped).
+CAM_INSET_MAX_AREA = 0.18  # an inset is at most this share of the canvas (<= ~18 %) ...
+CAM_INSET_MIN_W = 0.30     # ... and at least this share of the canvas width
+OVERLAY_W = 0.40           # an overlaid inset's width (share of the canvas width) ...
+OVERLAY_MIN_W = CAM_INSET_MIN_W   # ... down to this when the action is under it in both corners
+CORNER_TOL = 2 * INSET_MARGIN     # px an inset's bottom / side may sit off the canvas corner
+ACTION_PAD = 24            # canvas px round an action point an overlaid inset keeps clear of
+
+
+def inset_corner(box):
+    """"left" / "right": the bottom corner an inset [x, y, w, h] (canvas px) sits in (its bottom
+    and one side within CORNER_TOL of the canvas edges), else None."""
+    if not box:
+        return None
+    x, y, w, h = (int(v) for v in box)
+    if OUT_H - (y + h) > CORNER_TOL or y + h > OUT_H:
+        return None
+    if 0 <= x <= CORNER_TOL:
+        return "left"
+    if 0 <= OUT_W - (x + w) <= CORNER_TOL:
+        return "right"
+    return None
+
+
+def inset_area(box):
+    return round(int(box[2]) * int(box[3]) / float(OUT_W * OUT_H), 4)
+
+
+def inset_ok(box):
+    """Whether an inset [x, y, w, h] meets the inset rule: in a bottom corner, at most
+    CAM_INSET_MAX_AREA of the canvas, at least CAM_INSET_MIN_W of its width."""
+    return bool(box) and inset_corner(box) is not None and \
+        inset_area(box) <= CAM_INSET_MAX_AREA + 1e-9 and int(box[2]) >= CAM_INSET_MIN_W * OUT_W
+
+
+def corner_box(w, h, side):
+    """[x, y, w, h] of a w x h inset in the bottom corner on `side` (its INSET_MARGIN kept)."""
+    w, h = int(w), int(h)
+    return [INSET_MARGIN if side == "left" else OUT_W - INSET_MARGIN - w, OUT_H - INSET_MARGIN - h,
+            w, h]
+
+
+def overlay_size(cam_ar, w_frac=OVERLAY_W, max_area=CAM_INSET_MAX_AREA):
+    """(w, h) canvas px of an inset overlaid on the frame: `w_frac` of the canvas width (never under
+    CAM_INSET_MIN_W) at the cam crop's aspect (INSET_AR_MIN..INSET_AR_MAX), shrunk to `max_area`."""
+    ar = clamp(float(cam_ar or INSET_AR_MAX), INSET_AR_MIN, INSET_AR_MAX)
+    w_min = even(math.ceil(CAM_INSET_MIN_W * OUT_W / 2.0) * 2)
+    w = max(float(w_min), float(w_frac) * OUT_W)
+    if w * (w / ar) > max_area * OUT_W * OUT_H:
+        w = max(float(w_min), math.sqrt(max_area * OUT_W * OUT_H * ar))
+    w = max(w_min, even(w))
+    return w, even(w / ar)
+
+
+def covered(box, points, pad=ACTION_PAD):
+    """How many canvas points [(t, x, y)] fall inside the inset `box` [x, y, w, h] grown by pad."""
+    x, y, w, h = (int(v) for v in box)
+    return sum(1 for _t, px, py in points or []
+               if x - pad <= px <= x + w + pad and y - pad <= py <= y + h + pad)
+
+
+def place_inset(w, h, side, points, pad=ACTION_PAD):
+    """(box, side, hits): the w x h inset in the bottom corner on `side` (the cam's side in the
+    source), in the other bottom corner when the tracked action (canvas points) is under it there
+    and not there; with the action under both, the corner with fewer points under it."""
+    best = None
+    for s in (side, "right" if side == "left" else "left"):
+        box = corner_box(w, h, s)
+        n = covered(box, points, pad)
+        if n == 0:
+            return box, s, 0
+        if best is None or n < best[2]:
+            best = (box, s, n)
+    return best
+
+
+def band_points(plan, samples=None):
+    """[(t, x, y)] canvas px of the tracked action of a band plan (its motion samples [t, cx, cy, e]
+    src px through the band's path): the points the band shows."""
+    b = plan["band"]
+    samples = (plan.get("action") or {}).get("samples") if samples is None else samples
+    k = OUT_W / float(b["w"])
+    ky = float(b["out_h"]) / float(b["h"])
+    out = []
+    for s in samples or []:
+        t, cx, cy = s[0], s[1], s[2]
+        if cx is None or cy is None:
+            continue
+        x0 = x_at(plan["pan"], t)
+        y0 = x_at(plan["pan_y"], t) if plan.get("pan_y") else int(b.get("y", 0))
+        px, py = (cx - x0) * k, int(plan.get("band_y", 0)) + (cy - y0) * ky
+        if 0 <= px < OUT_W and plan.get("band_y", 0) <= py < plan.get("band_y", 0) + b["out_h"]:
+            out.append((float(t), round(px, 1), round(py, 1)))
+    return out
+
+
+def caption_clear_of(cap_y, box, half=CAP_HALF, pad=CAP_CARD_PAD):
+    """The captions' centre line moved above an inset [x, y, w, h] its block would run into (the
+    caption block spans the canvas width), else cap_y."""
+    if not box:
+        return int(cap_y)
+    return int(min(int(cap_y), int(box[1]) - half - pad))
+
+
+def caption_overlap(cap_y, box, half=CAP_HALF):
+    """Whether the caption block centred on cap_y runs into the inset [x, y, w, h]."""
+    return bool(box) and int(cap_y) + half > int(box[1]) and int(cap_y) - half < int(box[1]) + \
+        int(box[3])
 
 
 # ---------------------------------------------------------------- action

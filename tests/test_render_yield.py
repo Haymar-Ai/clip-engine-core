@@ -336,7 +336,10 @@ def split(monkeypatch):
 
 
 def test_the_split_fills_both_panels_and_slices_nothing(split):
-    p = split(_args("streamers", "stream"))
+    # the panel split (tech's screen split, renders outside the stream / gaming verticals); a
+    # stream / gaming clip's split shows the cam as the v3 card
+    # (tests/test_stream_cam_always_on.py path d)
+    p = split(_args("streamers"))
     assert p["layout"] == "gamestack" and p["streamer_split"]
     gw, gh, gx, gy = p["game_box"]
     game = [gx, gy, gx + gw, gy + gh]
@@ -353,7 +356,8 @@ def test_the_split_fills_both_panels_and_slices_nothing(split):
 
 
 def test_no_split_without_a_facecam_that_holds_every_shot(split):
-    assert split(_args("streamers", "stream"), holds=False) is None
+    # outside the stream / gaming verticals (a stream / gaming clip keeps a cam that loses the face)
+    assert split(_args("streamers"), holds=False) is None
     assert split(_args("streamers", "stream"), face=[0.1, 0.28, 0.3]) is None   # a camera shot
 
 
@@ -374,7 +378,7 @@ def _canvas_rows_std(graph, n=3):
 def test_the_split_canvas_has_no_band_rows_the_dual_view_does(split):
     """Row-variance check on the rendered canvas: every row of the split shows picture (noise
     keeps its spread); the dual view's blurred header rows are flat."""
-    split_rows = _canvas_rows_std(recompose.gamestack_vf(split(_args("streamers", "stream"))))
+    split_rows = _canvas_rows_std(recompose.gamestack_vf(split(_args("streamers"))))
     assert split_rows.min() > 20.0
     hh, ph, seam = recompose.dual_view_geometry(W, H)
     dv = {"layout": "dual_view", "src_w": W, "src_h": H, "header_h": hh, "panel_h": ph,
