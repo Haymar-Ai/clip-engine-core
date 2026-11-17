@@ -152,3 +152,7 @@ clipengine/
 
 `clipengine/render/models/face_detection_yunet_2023mar.onnx` is the YuNet face detector from the
 OpenCV Zoo (opencv_zoo, MIT license); see `clipengine/render/models/NOTICE.md`.
+
+## Licence
+
+Licence: not yet chosen, all rights reserved.
