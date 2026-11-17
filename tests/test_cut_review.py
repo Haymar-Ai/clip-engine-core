@@ -451,18 +451,16 @@ def test_the_render_seats_the_cut_before_the_caption_pass(db, monkeypatch):
     assert feats["cut_seat"]["end"]["how"] == "breath"
 
 
-def test_a_moved_cut_the_crop_refuses_goes_back_to_selects_cut_with_a_title(db, monkeypatch):
-    """11-09 2874 (replay): the review moved the start back 4 s onto a sliced graphic and the
-    crop planner refused the render; select's cut rendered, so the clip goes back to it, with a
-    title the review writes for that cut (a chat pick has none)."""
+def _undo_render(db, monkeypatch, llm, hook=None):
+    """A clip with no title the review moves back onto S1; the crop refuses the moved cut,
+    select's cut renders. Returns (row, recompose starts)."""
     from clipengine import cut_review
     from clipengine import engine
-    clip, media = _clip(db, hook=None)
+    clip, media = _clip(db, hook=hook)
     runstate.update_source(clip["source_id"], state="selected", duration_s=40.0)
-    llm = LLM(answer(start=1, title_ok=False, title="Moved title"),
-              answer(title_ok=False, title="Title for the old cut"))
     monkeypatch.setattr(cut_review, "claude_llm", lambda vc, st=None: llm)
     monkeypatch.setattr(engine, "_window_words", lambda m: WINDOW)
+    monkeypatch.setattr(engine, "_cached_window_words", lambda m, model=None: WINDOW)
     monkeypatch.setattr(engine, "_window_rms", lambda m, d: None)
     monkeypatch.setattr(engine, "_caption_step", lambda c, m, d=None: c)
     monkeypatch.setattr(engine, "cut_seat_enabled", lambda cfg=None: False)
@@ -480,13 +478,42 @@ def test_a_moved_cut_the_crop_refuses_goes_back_to_selects_cut_with_a_title(db, 
     monkeypatch.setattr(engine, "_run_quality_gate", lambda o, c, qc=None: {"verdict": "pass"})
     monkeypatch.setattr(engine, "_store_clip", lambda f, clip: str(f))
     assert engine.render(runstate.clip(clip["clip_id"])) is True
-    row = runstate.clip(clip["clip_id"])
-    assert row["start_s"] == CUT[0] and row["end_s"] == CUT[1]
-    assert row["hook"] == "Title for the old cut" and len(starts) == 2 and starts[0] < 7.0
+    return runstate.clip(clip["clip_id"]), starts
+
+
+def test_a_moved_cut_the_crop_refuses_goes_back_to_selects_cut_keeping_the_reviews_title(
+        db, monkeypatch):
+    """The review moved the start back 4 s onto a sliced graphic and the crop planner refused the
+    render; select's cut rendered, so the clip goes back to it. The clip had no title of its
+    own, so it keeps the review's."""
+    llm = LLM(answer(start=1, title_ok=False, title="Banned from the border for life"),
+              RuntimeError("the kept title needs no second review"))
+    row, starts = _undo_render(db, monkeypatch, llm)
+    assert (row["start_s"], row["end_s"]) == CUT and len(starts) == 2 and starts[0] < 7.0
+    assert row["hook"] == "Banned from the border for life" and len(llm.prompts) == 1
     rec = json.loads(row["features_json"])["cut_review"]
-    assert rec[0]["verdict"] == "move" and "refused" in rec[0]["undone"]
-    assert rec[1]["title_only"] and rec[1]["verdict"] == "keep"
-    assert "FIXED" in llm.prompts[1]
+    assert len(rec) == 1 and rec[0]["verdict"] == "move" and "refused" in rec[0]["undone"]
+
+
+def test_a_kept_title_said_only_outside_the_old_cut_is_written_again(db, monkeypatch):
+    """The review's title for the moved cut quotes S1 ("... the worst streamer he has ever met"),
+    which select's cut leaves out: on the way back the review writes the title for that cut."""
+    llm = LLM(answer(start=1, title_ok=False, title="The worst streamer he ever met"),
+              answer(title_ok=False, title="Title for the old cut"))
+    row, starts = _undo_render(db, monkeypatch, llm)
+    assert (row["start_s"], row["end_s"]) == CUT and len(starts) == 2
+    assert row["hook"] == "Title for the old cut"
+    rec = json.loads(row["features_json"])["cut_review"]
+    assert rec[0]["verdict"] == "move" and rec[0]["undone"] and rec[1]["title_only"]
+
+
+def test_a_clip_with_its_own_title_gets_it_back_on_the_undo(db, monkeypatch):
+    """A clip titled before the review (select's pick) gets that title back on undo, as before."""
+    llm = LLM(answer(start=1, title_ok=False, title="Moved title"),
+              RuntimeError("no second review"))
+    row, starts = _undo_render(db, monkeypatch, llm, hook="Select's own title")
+    assert (row["start_s"], row["end_s"]) == CUT and len(starts) == 2
+    assert row["hook"] == "Select's own title" and len(llm.prompts) == 1
 
 
 def test_a_title_built_from_words_outside_the_clip_is_asked_for_again():
@@ -645,3 +672,60 @@ def test_an_end_moved_onto_the_windows_last_line_is_refused():
     r = cut_review.review(clip, WINDOW, "stream", VC, llm=LLM(answer(end=6)), media_dur=30.0,
                           st=cut_review.DEFAULTS)
     assert r["verdict"] == "move" and r["end"] > 24.0
+
+
+# ---------------------------------------------------------------- hooks for clips with no title
+
+def test_a_title_only_review_runs_without_the_windows_time(db, monkeypatch):
+    """The full review needs REVIEW_LLM_S of the window; a title-only one is one short call
+    (6-15 s) and skips the time check (a clip with no title would ship with no hook)."""
+    from clipengine import engine
+    clip, media = _clip(db, hook=None)
+    monkeypatch.setattr(engine, "WINDOW_DEADLINE", time.monotonic() + 5.0)
+    no = LLM(RuntimeError("must not be asked"))
+    assert engine._cut_review(clip, {}, media, 40.0, llm=no, words_fn=lambda m: WINDOW)[1] is None
+    llm = LLM(answer(title_ok=False, title="Banned from the border for life"))
+    new, r = engine._cut_review(clip, {}, media, 40.0, llm=llm, words_fn=lambda m: WINDOW,
+                                rms_fn=lambda m, d: None, title_only=True)
+    assert r is not None and new["hook"] == "Banned from the border for life"
+    assert runstate.clip(clip["clip_id"])["hook"] == "Banned from the border for life"
+    assert no.prompts == [] and len(llm.prompts) == 1 and "FIXED" in llm.prompts[0]
+
+
+def test_the_render_titles_a_clip_the_full_review_had_no_time_for(db, monkeypatch):
+    from clipengine import cut_review
+    from clipengine import engine
+    clip, media = _clip(db, hook=None)
+    runstate.update_source(clip["source_id"], state="selected", duration_s=40.0)
+    llm = LLM(answer(title_ok=False, title="Banned from the border for life"))
+    monkeypatch.setattr(cut_review, "claude_llm", lambda vc, st=None: llm)
+    monkeypatch.setattr(engine, "_window_words", lambda m: WINDOW)
+    monkeypatch.setattr(engine, "_cached_window_words", lambda m, model=None: WINDOW)
+    monkeypatch.setattr(engine, "_window_rms", lambda m, d: None)
+    monkeypatch.setattr(engine, "_caption_step", lambda c, m, d=None: c)
+    monkeypatch.setattr(engine, "cut_seat_enabled", lambda cfg=None: False)
+    monkeypatch.setattr(engine, "_review_room", lambda c, need: "5s of the window left, ~45s needed")
+    cmds = []
+
+    def recompose(cmd, run=None, deadline=None, **kw):
+        cmds.append(cmd)
+        pathlib.Path(cmd[6]).write_bytes(b"fake mp4")
+        return subprocess.CompletedProcess(cmd, 0, stdout='QC {"layout": "track"}\n', stderr="")
+    monkeypatch.setattr(engine, "_run_recompose", recompose)
+    monkeypatch.setattr(engine, "_run_quality_gate", lambda o, c, qc=None: {"verdict": "pass"})
+    monkeypatch.setattr(engine, "_store_clip", lambda f, clip: str(f))
+    assert engine.render(runstate.clip(clip["clip_id"])) is True
+    row = runstate.clip(clip["clip_id"])
+    assert row["hook"] == "Banned from the border for life" and len(llm.prompts) == 1
+    assert "--hook" in cmds[0] and cmds[0][cmds[0].index("--hook") + 1] == row["hook"]
+    rec = json.loads(row["features_json"])["cut_review"]
+    assert len(rec) == 1 and rec[0]["title_only"] and (row["start_s"], row["end_s"]) == CUT
+
+
+def test_a_titled_clip_with_no_time_for_the_review_asks_nothing(db, monkeypatch):
+    from clipengine import engine
+    clip, media = _clip(db, hook="Old title")
+    monkeypatch.setattr(engine, "_review_room", lambda c, need: "no time")
+    no = LLM(RuntimeError("must not be asked"))
+    assert engine._cut_review(clip, {}, media, 40.0, llm=no, words_fn=lambda m: WINDOW)[1] is None
+    assert no.prompts == [] and runstate.clip(clip["clip_id"])["hook"] == "Old title"

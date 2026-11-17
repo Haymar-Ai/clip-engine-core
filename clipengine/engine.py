@@ -2794,13 +2794,15 @@ def _cut_review(clip, src, media, media_dur, feedback=None, llm=None, words_fn=N
     its own sidecar inside), the moved cut and its sidecar or the new title on the clip row.
     Sentence clips only; a review that cannot run (off, no time, no words, an LLM error) leaves
     the clip exactly as it is. `feedback` = the reject reasons of a render that failed;
-    `title_only`: the cut is fixed, only the title is asked for."""
+    `title_only`: the cut is fixed, only the title is asked for; it skips the window's time
+    check (one short claude call, 6-15 s: a clip with no title would otherwise ship with no
+    hook)."""
     from clipengine import cut_review
     st = cut_review.settings()
     cid = clip["clip_id"]
     if not st.get("enabled") or (clip.get("boundary_type") or "sentence") != "sentence":
         return clip, None
-    why = _review_room(clip, need_s)
+    why = None if title_only else _review_room(clip, need_s)
     if why:
         _log("info", "render", f"clip {cid}: no cut review ({why})", clip_id=cid)
         return clip, None
@@ -2888,9 +2890,10 @@ def _title_after_cut_moves(clip, src, media, media_dur, before):
 
 def _undo_review_move(clip, src, media, media_dur, why):
     """The clip back on the cut the review moved it from (its sidecar and its title; a clip that
-    had no title asks the review for one on that cut, title_only), the cuts seated and the caption
-    step run again for it. None when the review did not move this clip's cut, it was undone
-    already, or the caption step drops it."""
+    had no title keeps the review's, re-asked title_only when it uses words said outside that
+    cut, or asks the review for one), the cuts seated and the caption step run again for it.
+    None when the review did not move this clip's cut, it was undone already, or the caption
+    step drops it."""
     cid = clip["clip_id"]
     try:
         feats = json.loads(clip.get("features_json") or "{}") or {}
@@ -2907,7 +2910,10 @@ def _undo_review_move(clip, src, media, media_dur, why):
     feats["cut_review"] = hist
     fj = json.dumps(feats, default=str)
     wp = last.get("old_words_path") or clip.get("words_path")
-    hook = last.get("old_hook")
+    # a clip that had no title before the review keeps the review's; it was written for the
+    # moved cut, so the title check below reads it against the cut it is back on
+    kept = not last.get("old_hook") and bool(clip.get("hook"))
+    hook = last.get("old_hook") or clip.get("hook")
     runstate.update_clip(cid, start_s=s0, end_s=e0, words_path=wp, hook=hook, features_json=fj)
     _log("info", "render", f"clip {cid}: the render refused the reviewed cut "
          f"{float(clip['start_s']):.2f}-{float(clip['end_s']):.2f}s ({str(why)[-120:]}); back to "
@@ -2917,7 +2923,8 @@ def _undo_review_move(clip, src, media, media_dur, why):
     if not hook:
         back, _r = _cut_review(back, src, media, media_dur, title_only=True)
     back = _seat_cuts(back, media, media_dur)
-    before = (back["start_s"], back["end_s"])
+    before = (float(clip["start_s"]), float(clip["end_s"])) if kept else \
+        (back["start_s"], back["end_s"])
     try:
         back = _caption_step(back, media, media_dur)
         back = _final_cut(back, src, media, media_dur)
@@ -3589,6 +3596,9 @@ def render(clip):
         # hears the cut they chose
         while True:
             clip, _review = _cut_review(clip, src, media, media_dur)
+            if _review is None and not clip.get("hook"):
+                # no review (no time) and no title: the review titles the cut
+                clip, _title = _cut_review(clip, src, media, media_dur, title_only=True)
             clip = _seat_cuts(clip, media, media_dur)
             before_captions = (clip["start_s"], clip["end_s"])
             try:

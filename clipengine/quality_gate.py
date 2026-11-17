@@ -1404,15 +1404,20 @@ A hook is a curiosity title. It may paraphrase, compress, tease ("Why ...", "How
 "How" hook does NOT need the clip to give the full explanation, as long as the clip is about
 that topic.
 
-The hook may also describe what is SEEN in the clip (gameplay, an action, a reaction, a card,
-a crash) that a transcript cannot show. A claim the transcript simply does not mention is NOT a
-failure.
+The hook may also describe what is SEEN in the clip (gameplay, an action, a reaction, a crash)
+that a transcript cannot show: a plain description of the action passes when nothing said
+contradicts it.
 
-The hook FAILS only when one of these is true:
+The hook FAILS when one of these is true:
 1. WRONG SUBJECT: it pins the claim on a person or thing the transcript shows it is not about
    (e.g. a remark about "his hair" made right after greeting someone else by name).
 2. CONTRADICTED: the transcript explicitly says the opposite of the hook's specific claim.
 3. OFF TOPIC: the clip is about something else entirely.
+4. NOT MENTIONED: it states a specific fact that nobody says in the transcript: a number or an
+   amount, a name, a person's role or job, an event or an outcome. "Not mentioned" is a failure
+   for these, even when it might be true or might be on screen (e.g. "the $25,000 card" when
+   nobody says a price, "Wrestler demonstrates ..." when nobody says he wrestles, "even dealers
+   suffer" when nobody mentions dealers).
 
 Return ONLY compact JSON (no code fences, no commentary):
 {{"supported": true|false, "quote": "<=120 chars quote from the transcript", "reason": "<=160 chars>"}}
@@ -1430,7 +1435,9 @@ def make_hook_ground_judge(cfg_select=None, model=None, timeout_s=120):
     approved clip 119 ("Why he gave up on 300 pounds": "never explains why"); a first version
     of this one that also failed claims the transcript "never touches" failed two approved
     10-13 batch clips whose hooks describe gameplay / the screen (03_142 "Zipline cross goes
-    horribly wrong", 03_14)."""
+    horribly wrong", 03_14). A specific fact nobody says (a number, a name, a role, an event)
+    fails again, a description of the action still passes: hooks this judge had passed named a
+    price, a job and a group nobody in the clip mentions."""
     from clipengine import select_semantic as ss     # noqa: WPS433
     opts = dict(cfg_select or {})
     mdl = model or opts.get("semantic_model") or "opus"
@@ -1440,7 +1447,8 @@ def make_hook_ground_judge(cfg_select=None, model=None, timeout_s=120):
         left = second_asr.time_left()
         t = float(timeout_s) if left is None else min(float(timeout_s), left - 5.0)
         if t < 10.0:
-            return {"error": f"window cap near ({left:.0f} s left): judge not asked"}
+            return {"error": f"window cap near ({left:.0f} s left): judge not asked",
+                    "skipped": "time"}
         prompt = HOOK_GROUND_PROMPT.format(hook=str(hook or "").strip(),
                                            transcript=str(transcript or "").strip())
         try:
@@ -3102,7 +3110,8 @@ def caption_check_with_tiebreak(cap, asr_words, dur, src_media=None, start_s=Non
 # hooks it was given. Without a judge answer the lexical floor decides: at least one hook
 # content word said in the clip (second ASR words inside the clip + captions; stems and spelling
 # variants count). It is only a floor because hooks paraphrase: approved 10-15 clip 3 "Why I
-# bet against the crowd" shares 0/2 words with "take the opposite side of the majority".
+# bet against the crowd" shares 0/2 words with "take the opposite side of the majority". A
+# judge skipped for the window's time cap leaves a missed floor unjudged.
 HOOK_STOPWORDS = frozenset("""
 a an the and or but so if then than of to in on at by for from with without about into over
 under after before up down out off is are was were be been being am do does did done doing have
@@ -3114,11 +3123,29 @@ one ones s t isnt arent wasnt dont doesnt didnt cant wont aint
 HOOK_GROUND_MIN_WORDS = 1         # hook content words that must be said in the clip
 
 
+STEM_SUFFIXES = ("ingly", "edly", "ing", "ers", "ies", "ied", "es", "ed", "er", "ly", "s")
+
+
 def _stem(t):
-    for suf in ("ingly", "edly", "ing", "ers", "ies", "ied", "es", "ed", "er", "ly", "s"):
-        if t.endswith(suf) and len(t) - len(suf) >= 3:
-            return t[: -len(suf)]
-    return t
+    """Every stem of token `t` (a frozenset): `t` itself and `t` less each suffix it ends with
+    (a stem keeps >= 3 letters); after -ing / -ed / -er / -es also the stem with its silent e
+    (agreed -> agree, dating -> date) and, when 4+ letters are left, with a doubled last consonant
+    undone (stepping -> stepp -> step); -ies / -ied -> -y. Two words match when their stems meet.
+    The one-stem rule took "water" to "wat" and "watering" to "water", "stepping" to "stepp",
+    so a hook saying "watering" or "stepping" missed a clip that says "water" or "step"."""
+    out = {t}
+    for suf in STEM_SUFFIXES:
+        if not t.endswith(suf) or len(t) - len(suf) < 3:
+            continue
+        s = t[: -len(suf)]
+        out.add(s)
+        if suf[0] in "ie":
+            out.add(s + "e")
+            if len(s) >= 5 and s[-1] == s[-2] and s[-1] not in "aeiouls":
+                out.add(s[:-1])
+        if suf in ("ies", "ied"):
+            out.add(s + "y")
+    return frozenset(out)
 
 
 def hook_content_tokens(hook):
@@ -3130,10 +3157,10 @@ def hook_grounding(hook, transcript_tokens):
     content = hook_content_tokens(hook)
     if not content:
         return 0.0, [], content
-    stems = {_stem(t) for t in transcript_tokens}
+    stems = set().union(*(_stem(t) for t in transcript_tokens)) if transcript_tokens else set()
     toks = set(transcript_tokens)
     matched = [c for c in content
-               if c in toks or _stem(c) in stems
+               if c in toks or _stem(c) & stems
                or any(_tok_match(c, t) for t in toks if abs(len(t) - len(c)) <= 3)]
     return len(matched) / len(content), matched, content
 
@@ -3167,9 +3194,23 @@ def hook_support_verdict(hook, asr_words, caption_words, dur, *, judge=None,
     else:
         rep["decided_by"] = "lexical"
         if len(matched) < min_words:
+            if judge_skipped_for_time(v):
+                # the floor alone never rejects a hook the judge had no time for (most such
+                # wrong_hook rejects matched the clip's topic): no verdict, a later review
+                # judges the hook
+                rep["decided_by"] = "deferred"
+                return {**rep, "passed": None, "errors": [],
+                        "reason": "the judge was not asked (window time cap) and the lexical "
+                                  "floor is not met: deferred to the eye-check"}
             errors.append(f"hook not grounded in the clip: {len(matched)}/{len(content)} "
                           f"content words said ({', '.join(content)})")
     return {**rep, "passed": not errors, "errors": errors}
+
+
+def judge_skipped_for_time(v):
+    """True for a hook judge answer that is the window's time cap, not a verdict or a fault."""
+    return isinstance(v, dict) and (v.get("skipped") == "time"
+                                    or "judge not asked" in str(v.get("error") or ""))
 
 
 # Ending: the clip must end on a complete sentence, not on a filler, not mid-word, and the next
