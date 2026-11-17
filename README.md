@@ -106,15 +106,13 @@ Environment switches (each `=0` turns a step off): `TOPIC_MAP`, `END_RULE`, `PRO
 
 `select.semantic_backend` (picks, topic map, cut review, hook judge):
 
-- `claude_cli`: runs `claude -p --model <semantic_model> --output-format json` with the prompt on
-  stdin. It uses whatever Claude account the environment selects; `select.claude_config_dir`
-  and/or `select.claude_env_file` (a KEY=VALUE file) pick one explicitly. The engine passes no
-  tool restrictions: `claude -p` runs with the tools and permission settings of that account's
-  Claude Code configuration. Read-only tools such as Read are allowed there by default, so words
-  spoken in a video can instruct the model to read a file under the directory you run from and
-  put it into a clip's hook (burned into the video and written to the sidecar). Run from a
-  directory that holds no secrets, and point `claude_config_dir` at a config whose permission
-  settings deny every tool.
+- `claude_cli`: runs `claude -p --model <semantic_model> --output-format json --tools ""` with the
+  prompt on stdin. It uses whatever Claude account the environment selects;
+  `select.claude_config_dir` and/or `select.claude_env_file` (a KEY=VALUE file) pick one
+  explicitly. `--tools ""` turns every tool off for the call: the prompt carries the video's
+  transcript, and words spoken in a video must not be able to make the model read a file or run
+  a command. The answer only needs the prompt. `tests/test_claude_tools.py` fails on any
+  `claude -p` call in the package that does not name its tools.
 - `ollama`: POSTs to `http://localhost:11434/api/generate` with `semantic_model`.
 
 `semantic_fallback_backend` / `semantic_fallback_model` are tried once when the primary fails.

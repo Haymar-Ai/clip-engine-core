@@ -1114,6 +1114,8 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
       - black_frozen: < 2 % black, < 5 % frozen (ffmpeg blackdetect/freezedetect)
       - caption_presence: words sidecar non-empty, > 1 s total spoken
       - layout_sanity: trust render QC's `layout` matches the expected stream layout
+      - gameplay_layout: a gameplay clip (gameplay_clip) rendered as a face-follow crop (track,
+        split, ...) fails
       - visual_quality: median luma / contrast / sharpness + blur-fill share
       - (quality_gate.clip_checks, same as the full gate): flat edge band,
         graphics sliced by the crop, captions vs a second ASR, hook grounding (no hook =
@@ -1136,6 +1138,9 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
     # layout sanity: the render emitted a layout. Just record it (informational).
     report["layout"] = {"passed": None, "reason": "informational",
                         "value": qc.get("layout")}
+    # gameplay never ships a face-follow crop (track round the cam)
+    report["gameplay_layout"] = quality_gate.measure_gameplay_layout(
+        gameplay_clip(clip), qc.get("layout"), (qc.get("banner_guard") or {}).get("action"))
     # brightness / contrast / sharpness / blur-fill on the pixels
     try:
         report["visual_quality"] = quality_gate.measure_visual_quality(
@@ -1150,7 +1155,7 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
     # Collapse to a single verdict (a failed caption check is a warning: Amendment 1).
     reasons = []
     for k in ("duration_bounds", "audio_lufs", "caption_presence", "black_frozen",
-              "visual_quality") + quality_gate.CLIP_CHECK_KEYS:
+              "gameplay_layout", "visual_quality") + quality_gate.CLIP_CHECK_KEYS:
         if k in NON_REJECTING_GATE_KEYS:
             continue
         m = report.get(k) or {}
@@ -1336,6 +1341,17 @@ def _content_kind_of(source_id):
         if row and row.get("niche"):
             return source_kind(row.get("title"))
     return None
+
+
+def gameplay_clip(clip, src=None):
+    """Whether a clip is gameplay (quality_gate.gameplay_clip on its source's vertical, niche and
+    kind, and the layout it asked for): recompose renders it the game band and the stream lean
+    gate fails it rendered as a face-follow crop."""
+    sid = (src or {}).get("source_id") or clip.get("source_id")
+    if src is None:
+        src = (runstate.source(sid) if sid else None) or {}
+    return quality_gate.gameplay_clip(src.get("vertical"), _niche_of(sid), _content_kind_of(sid),
+                                      clip.get("layout"))
 
 
 def _run_recompose(cmd):

@@ -141,10 +141,14 @@ def _scrub(text, secrets):
 
 
 def _claude_cli(prompt, model, timeout, opts=None):
+    """Model text for a prompt from `claude -p` with no tools (`--tools ""`): the prompt carries
+    third-party transcript text and the answer only needs the prompt (with tools, a transcript
+    line could make the call read a local file and burn its contents into a hook)."""
     env, secrets = _claude_env(opts)
     kw = {} if env is None else {"env": env}
     try:
-        p = subprocess.run(["claude", "-p", "--model", model, "--output-format", "json"],
+        p = subprocess.run(["claude", "-p", "--model", model, "--output-format", "json",
+                            "--tools", ""],
                            input=prompt, capture_output=True, text=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"claude timed out after {timeout:g}s") from None

@@ -22,6 +22,8 @@ Codes (one per defect). `fix` names the kind of repair that fixes it; None = not
   no_face                    no speaker on screen for a face crop            -> not fixable
   wrong_speaker              the kept face is a silent listener              -> not fixable
   cover_frame_layout         the first frames / cover are another layout     -> not fixable
+  gameplay_face_follow       gameplay rendered as a face-follow crop (track: -> not fixable
+                             the game cropped tight round the cam)
   too_dark                   visual quality: too dark                        -> levels
   av_sync / loudness         encode faults                                   -> rerender
   render_timeout             a time cap killed the render                    -> rerender
@@ -59,6 +61,9 @@ CODES = {
     # no repair here does either, so the code is reported, not repaired.
     "wrong_speaker": (None, "the kept face is not the one speaking (a silent listener)"),
     "cover_frame_layout": (None, "the first frames / cover show another layout than the clip"),
+    # gameplay never ships a face-follow crop (the gate's gameplay_layout)
+    "gameplay_face_follow": (None, "gameplay rendered as a face-follow crop (the game cropped "
+                                   "tight)"),
     "too_dark": (LEVELS, "too dark"),
     "av_sync": (RERENDER, "audio / video out of sync"),
     "loudness": (RERENDER, "loudness off target"),
@@ -129,6 +134,10 @@ _RULES = [
     ("wrong_speaker", r"\bwrong speaker\b|\bkept face is not the speaker\b"
                       r"|\bsilent (?:listener|guest)\b|\bspeaker is off screen\b"),
     ("cover_frame_layout", r"\bcover frames?\b"),
+    # the gate's and recompose's own words only: a reviewer's "the face-follow crop shows the
+    # ceiling" (an IRL clip) is no gameplay reject
+    ("gameplay_face_follow", r"\bgameplay_layout\b"
+                             r"|\bgameplay (?:rendered|planned) as '\w+', a face-follow crop\b"),
     ("too_dark", r"\btoo dark\b"),
     ("av_sync", r"\bav_sync\b|\ba/v (?:sync|drift)\b"),
     ("loudness", r"\bloudness\b|\blufs\b"),
@@ -194,6 +203,8 @@ def codes_from_gate_report(report):
             add("edge_slice", f"{key}: {e}")
         elif key == "cover_frame":
             add("cover_frame_layout", f"cover_frame: {e}")
+        elif key == "gameplay_layout":
+            add("gameplay_face_follow", f"gameplay_layout: {e}")
         elif key == "kept_face_speaker":
             add("wrong_speaker", f"kept_face_speaker: {e}")
         elif key == "visual_quality":

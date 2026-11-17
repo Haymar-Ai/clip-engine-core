@@ -466,12 +466,27 @@ def test_gamestack_auto_for_gaming_vertical(monkeypatch):
     assert plan["layout"] == "gamestack"
 
 
-def test_gamestack_falls_back_to_track_when_no_cam(monkeypatch):
+def test_gamestack_request_never_falls_back_to_track_when_no_cam(monkeypatch):
+    """A face but no cam inset used to fall back to track (the game cut tight round the cam); a
+    gamestack request is gameplay: the game-only band, never track."""
     monkeypatch.setattr(recompose, "_plan_gamestack", lambda src, a: None)
     monkeypatch.setattr(recompose.reframe, "analyze", lambda *ar, **kw: {
         "layout": "track", "src_w": W_FULL, "src_h": H_FULL, "shots": [],
         "segments": [{"t0": 0.0, "t1": 3.0, "x": 100, "cut": True}]})
+    monkeypatch.setattr(recompose.reframe, "probe_size", lambda src: (W_FULL, H_FULL))
     a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--layout", "gamestack"])
+    plan = recompose.plan_layout(a, Path("s.mp4"))
+    assert plan["layout"] == "game_only"
+
+
+def test_talking_head_stream_still_falls_back_to_track_when_no_cam(monkeypatch):
+    """The stream vertical's talking heads / IRL vlogs (content kind talk) keep the speaker crop."""
+    monkeypatch.setattr(recompose, "_plan_gamestack", lambda src, a: None)
+    monkeypatch.setattr(recompose.reframe, "analyze", lambda *ar, **kw: {
+        "layout": "track", "src_w": W_FULL, "src_h": H_FULL, "shots": [],
+        "segments": [{"t0": 0.0, "t1": 3.0, "x": 100, "cut": True}]})
+    a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--vertical", "stream",
+                              "--niche", "streamers", "--content-kind", "talk"])
     plan = recompose.plan_layout(a, Path("s.mp4"))
     assert plan["layout"] == "track"
 

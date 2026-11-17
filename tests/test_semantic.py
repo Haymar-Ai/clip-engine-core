@@ -252,7 +252,7 @@ def test_claude_cli_backend_parses_fenced_result():
         picks = select_semantic.propose(_sents(20), "stream", CLAUDE_CFG)
     assert [(p["s0"], p["s1"], p["score"]) for p in picks] == [(2, 6, 88.0)]
     argv, kw = calls[0]
-    assert argv == ["claude", "-p", "--model", "sonnet", "--output-format", "json"]
+    assert argv == ["claude", "-p", "--model", "sonnet", "--output-format", "json", "--tools", ""]
     assert "[S2 8s] Sentence number 2." in kw["input"]
     assert select_semantic.RUBRICS["stream"] in kw["input"]
     assert kw["capture_output"] is True and kw["text"] is True and kw.get("timeout")

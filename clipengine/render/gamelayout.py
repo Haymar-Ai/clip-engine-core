@@ -353,6 +353,53 @@ def snap_to_rect(box, rect, face, src_w, src_h):
     return [x0, y0, x1, y1] if x1 - x0 >= 20 and y1 - y0 >= 20 else [int(v) for v in box]
 
 
+# A gameplay cam burned in mid-frame (no frame edge). Its overlay rect (all four borders read
+# round the face) is the proof it is a cam, not a face in the game.
+
+def inside_rect(box, rect):
+    """The cam box cut to the overlay rect (a mid-frame cam: every side may have grown past a
+    border into the game); the rect when they barely overlap. Never wider than the rect, so the
+    card stays on the cam."""
+    x0, y0 = max(int(box[0]), int(rect[0])), max(int(box[1]), int(rect[1]))
+    x1, y1 = min(int(box[2]), int(rect[2])), min(int(box[3]), int(rect[3]))
+    return [x0, y0, x1, y1] if x1 - x0 >= 20 and y1 - y0 >= 20 else [int(v) for v in rect]
+
+
+def union(a, b):
+    return [min(int(a[0]), int(b[0])), min(int(a[1]), int(b[1])), max(int(a[2]), int(b[2])),
+            max(int(a[3]), int(b[3]))]
+
+
+def pad_box(box, pad, src_w, src_h):
+    return [max(0, int(box[0]) - pad), max(0, int(box[1]) - pad),
+            min(int(src_w), int(box[2]) + pad), min(int(src_h), int(box[3]) + pad)]
+
+
+def shown_part(box, windows):
+    """The part of `box` the windows ([x0, y0, x1, y1]) show, whole or cut: the box clipped to the
+    union of the windows that meet it; None when none does."""
+    hit = [w for w in windows if min(box[2], w[2]) > max(box[0], w[0])
+           and min(box[3], w[3]) > max(box[1], w[1])]
+    if not hit:
+        return None
+    u = [min(w[0] for w in hit), min(w[1] for w in hit), max(w[2] for w in hit),
+         max(w[3] for w in hit)]
+    return [int(max(box[0], u[0])), int(max(box[1], u[1])), int(min(box[2], u[2])),
+            int(min(box[3], u[3]))]
+
+
+def cover_share(part, windows):
+    """The largest share of one window ([x0, y0, x1, y1]) the painted-out `part` takes."""
+    best = 0.0
+    for w in windows:
+        iw = min(part[2], w[2]) - max(part[0], w[0])
+        ih = min(part[3], w[3]) - max(part[1], w[1])
+        area = float(max(1, (w[2] - w[0]) * (w[3] - w[1])))
+        if iw > 0 and ih > 0:
+            best = max(best, iw * ih / area)
+    return round(best, 3)
+
+
 # ---------------------------------------------------------------- action
 
 def _blur(a, sigma):

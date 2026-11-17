@@ -1749,6 +1749,52 @@ def measure_layout_match(plan, campaign):
             "errors": [f"rendered layout {rendered!r} != configured {configured!r}"]}
 
 
+# ---------------------------------------------------------------- measurement: gameplay
+
+# A gameplay clip never ships a face-follow crop. The gamestack fallback used to give a stream whose
+# cam is burned in mid-frame the track crop: centred on the cam, the game cropped tight, the action
+# of the game out of the frame. Gameplay renders the game band (render/gamelayout.py: gamestack
+# with its cam card, or game only).
+FACE_FOLLOW_LAYOUTS = ("track", "split", "product_full_bleed", "full_bleed_speaker",
+                       "podcast_two_shot")
+GAMEPLAY_VERTICALS = ("gaming", "stream")
+ACTION_CROP = "full_bleed_action"   # recompose.full_bleed_action: a track-shaped 9:16 window over
+                                    # the action of gameplay with no face (no face crop)
+
+
+def gameplay_clip(vertical, niche=None, kind=None, layout=None):
+    """Whether a clip is gameplay: a gamestack request, or a gaming / stream vertical clip whose
+    source is gameplay by its kind ("screen": engine.source_kind of facecam / full-screen
+    gameplay) or by its niche (gaming). The stream vertical's talking heads and IRL vlogs
+    (kind "talk") keep their speaker crop; so does a stream clip with neither a kind nor the
+    gaming niche (a manual render)."""
+    if (layout or "") == "gamestack":
+        return True
+    vertical = (vertical or "").lower()
+    if vertical not in GAMEPLAY_VERTICALS or kind == "talk":
+        return False
+    return vertical == "gaming" or kind == "screen" or niche == "gaming"
+
+
+def face_follow(layout, guard_action=None):
+    """Whether a rendered layout is a face-follow crop (the full-bleed action crop is not)."""
+    return layout in FACE_FOLLOW_LAYOUTS and guard_action != ACTION_CROP
+
+
+def measure_gameplay_layout(gameplay, rendered_layout, guard_action=None):
+    """A gameplay clip (gameplay_clip) whose rendered layout is a face-follow crop fails (code
+    gameplay_face_follow). `guard_action` = the render's banner_guard action (QC line)."""
+    if not gameplay:
+        return {"passed": None, "reason": "not gameplay", "layout": rendered_layout}
+    if not rendered_layout:
+        return {"passed": None, "reason": "no rendered layout", "layout": None}
+    if face_follow(rendered_layout, guard_action):
+        return {"passed": False, "layout": rendered_layout,
+                "errors": [f"gameplay rendered as {rendered_layout!r}, a face-follow crop: the "
+                           f"game band (gamestack / game only) or no clip"]}
+    return {"passed": True, "layout": rendered_layout}
+
+
 # ---------------------------------------------------------------- measurement: layout quality
 
 CHART_TOP_H = 1312                     # must match render.recompose/reframe BROADCAST_TOP_H

@@ -604,9 +604,12 @@ def gamestack_v2_vf(plan):
     y = gamelayout.pan_expr(plan["pan_y"]) if plan.get("pan_y") else str(int(b.get("y", 0)))
     band_y = int(plan.get("band_y", 0))
     fw, fh = OUT_W // gamelayout.FILL_SCALE, OUT_H // gamelayout.FILL_SCALE
+    # a mid-frame cam the band shows is painted out of the band only (the card keeps it)
+    mask = overlays.cover_filter([plan["cam_mask"]], plan["src_w"], plan["src_h"]) \
+        if plan.get("cam_mask") else ""
     parts = ["[0:v]split=2[gsrc][csrc]" if plan.get("card") else "[0:v]null[gsrc]",
-             f"[gsrc]crop={gw}:{ch}:'{x}':'{y}',scale={OUT_W}:{gh}:flags=lanczos,setsar=1,"
-             f"split=2[band][bandf]",
+             f"[gsrc]{mask + ',' if mask else ''}crop={gw}:{ch}:'{x}':'{y}',"
+             f"scale={OUT_W}:{gh}:flags=lanczos,setsar=1,split=2[band][bandf]",
              f"[bandf]scale=-2:{fh},crop={fw}:{fh},gblur=sigma={gamelayout.FILL_SIGMA},"
              f"scale={OUT_W}:{OUT_H},setsar=1[fill]"]
     if not plan.get("card"):
@@ -925,7 +928,11 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
     calm game (2670 / 2500: the box grew to the whole frame, so the clip fell back to the track
     crop on the streamer's face), then the facecam's own box when the planned one reaches past it
     (bound_cam). A box inside the scene (a face in an IRL shot, not an inset at a frame edge) is
-    no cam: the caller falls back as before. None -> fallback."""
+    no cam: the caller falls back as before. None -> fallback.
+    For gameplay (game_band_only) a box inside the scene whose overlay borders are read round its
+    face is a cam burned in mid-frame: the card is cut from where it is and the band takes an x
+    clear of it, else shows it painted out (cam_mask), else the clip is game only (no card);
+    RenderError when no clean game band is left (_mid_cam_band)."""
     src_w, src_h = size
     channel = getattr(a, "channel", None) or None
     src_duration = float(getattr(a, "src_duration", 0) or 0)
@@ -951,7 +958,11 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
         return [_even(b[0] * src_w), _even(b[1] * src_h), _even(b[2] * src_w), _even(b[3] * src_h)]
 
     cam_box = px(box_norm)
-    if not gamelayout.is_inset(cam_box, src_w, src_h):
+    # a box inside the scene (no frame edge) is a person in an IRL shot, unless the clip is
+    # gameplay and the box is a cam overlay burned in mid-frame (its borders read round the face
+    # below): then the card is cut from where the cam is
+    mid = not gamelayout.is_inset(cam_box, src_w, src_h)
+    if mid and not game_band_only(a):
         log(f"gamestack: cam box {cam_box} sits inside the scene (no frame edge): no inset; "
             f"falling back")
         return None
@@ -968,13 +979,19 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
     snapped = False
     if face:
         # the overlay's own borders toward the frame centre (a calm or grown box runs past them
-        # into the game, a trimmed one stops short)
+        # into the game, a trimmed one stops short); a mid-frame cam has no edge side: cut to all
+        # four borders
         rect = gamelayout.overlay_rect(frames, face)
         if rect:
-            nb = gamelayout.snap_to_rect(cam_box, rect, face, src_w, src_h)
+            nb = gamelayout.inside_rect(cam_box, rect) if mid else \
+                gamelayout.snap_to_rect(cam_box, rect, face, src_w, src_h)
             if nb != cam_box:
                 log(f"gamestack: cam box {cam_box} -> {nb} on the overlay's borders {rect}")
                 cam_box, snapped = nb, True
+    if mid and not rect:
+        log(f"gamestack: box {cam_box} inside the scene shows no overlay borders round a face: "
+            f"no cam; falling back")
+        return None
     nb, why = bound_cam(cam_box, a, src, (src_w, src_h))
     if why:
         log(f"gamestack: {why}")
@@ -985,6 +1002,8 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
     if snapped or nb != cam_box:
         face = cam_face(nb) or face
     cam_box = nb
+    if mid:
+        gb = gamelayout.union(rect, cam_box)     # the overlay whole: its borders, the cam's box
     guard = int(round(GAMESTACK_CAM_GUARD_FRAC * src_w))
     guard_box = [max(0, gb[0] - guard), max(0, gb[1] - guard), min(src_w, gb[2] + guard),
                  min(src_h, gb[3] + guard)]
@@ -992,9 +1011,17 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
         face_med_norm = [face[0] / src_w, face[1] / src_h, face[2] / src_h]
     knobs = _v2_cfg(gscfg)
     share, band_y = knobs["share"], knobs["header_h"]
-    b = _v2_band(src, a, src_w, src_h, share,
-                 lambda gw: gamelayout.cam_free_ranges(src_w, gw, guard_box), [guard_box],
-                 widen_max=V2_WIDEN_MAX)
+    cover = mask_box = None
+    if mid:
+        mask_box = gamelayout.pad_box(gb, MID_CAM_MASK_PAD, src_w, src_h)
+        b, cover, why = _mid_cam_band(src, a, src_w, src_h, share, guard_box, mask_box,
+                                      widen_max=V2_WIDEN_MAX)
+        if b is None:
+            return _mid_cam_game_only(src, a, gscfg, size, guard_box, mask_box, why)
+    else:
+        b = _v2_band(src, a, src_w, src_h, share,
+                     lambda gw: gamelayout.cam_free_ranges(src_w, gw, guard_box), [guard_box],
+                     widen_max=V2_WIDEN_MAX)
     if b is None:
         log(f"gamestack: no {share:.0%} band clear of the cam box {guard_box}; falling back")
         return None
@@ -1002,6 +1029,10 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
     # the game and never covers it (the brief's 120 px overlap is never needed at a >= 48 % band)
     card = gamelayout.card_size(gamelayout.card_room(b["band"]["out_h"], band_y),
                                 max_area=knobs["area"])
+    if card is None and mid:
+        return _mid_cam_game_only(src, a, gscfg, size, guard_box, mask_box,
+                                  f"no room for the cam card under the {b['band']['out_h']} px "
+                                  f"band")
     if card is None:
         log(f"gamestack: no room for the cam card under the {b['band']['out_h']} px band; "
             f"falling back")
@@ -1017,7 +1048,10 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
         f"({shares['band']:.0%}), {len(b['pan'])} knot(s), action inside {b['inside_share']}; "
         f"cam card {kw}x{kh} {side} ({kw * kh / float(OUT_W * OUT_H):.0%}); "
         f"blur {shares['blur']:.0%}")
-    return {"layout": "gamestack", "v2": True, "src_w": src_w, "src_h": src_h,
+    if mid:
+        log(f"gamestack: mid-frame cam {mask_box}: " +
+            (f"painted out of the band ({cover})" if cover else "the band clear of it"))
+    plan = {"layout": "gamestack", "v2": True, "src_w": src_w, "src_h": src_h,
             "top_h": b["band"]["out_h"], "game": [b["band"]["w"], b["x_static"], False],
             "band": b["band"], "pan": b["pan"], "pan_y": b["pan_y"],
             "band_y": band_y, "header": lay["header"],
@@ -1029,18 +1063,30 @@ def _plan_gamestack_v2(src, a, cfg, gscfg, size):
             "face_median": face_med_norm, "channel": channel,
             "action": {"fps": gamelayout.TRACK_FPS, "samples": b["samples"], "peak": b["peak"],
                        "inside_share": b["inside_share"]}}
+    if mid:
+        plan.update(_mid_cam_keys(mask_box, cover, b))
+    return plan
 
 
-def _plan_game_only_v2(src, a, gscfg, size):
+def _plan_game_only_v2(src, a, gscfg, size, cam=None):
     """Game only v3: no face, so no card; the band following the action takes
     render.gamestack.game_only_share (0.42: 1446 rows) under the hook header, the middle of the
-    canvas (blurred fill <= 25 %)."""
+    canvas (blurred fill <= 25 %). `cam` = (guard, mask) of a gameplay cam burned in mid-frame
+    that no gamestack band could take: the band clear of it or with it painted out
+    (_mid_cam_band); None when neither keeps the banners whole."""
     sw, sh = size
     knobs = _v2_cfg(gscfg)
     band_y = knobs["header_h"]
-    b = _v2_band(src, a, sw, sh, knobs["game_only_share"], lambda gw: [(0, sw - gw)],
-                 min_share=min(gamelayout.GAME_ONLY_MIN_SHARE, knobs["game_only_share"]),
-                 max_h=gamelayout.GAME_ONLY_BAND_MAX_H, widen_max=V2_WIDEN_MAX_GAME_ONLY)
+    kw = dict(min_share=min(gamelayout.GAME_ONLY_MIN_SHARE, knobs["game_only_share"]),
+              max_h=gamelayout.GAME_ONLY_BAND_MAX_H, widen_max=V2_WIDEN_MAX_GAME_ONLY)
+    cover = None
+    if cam:
+        b, cover, why = _mid_cam_band(src, a, sw, sh, knobs["game_only_share"], cam[0], cam[1],
+                                      **kw)
+        if b is None:
+            log(f"game only: {why}")
+    else:
+        b = _v2_band(src, a, sw, sh, knobs["game_only_share"], lambda gw: [(0, sw - gw)], **kw)
     if b is None:
         return None
     lay = gamelayout.canvas_layout(b["band"]["out_h"], None, band_y=band_y)
@@ -1049,13 +1095,66 @@ def _plan_game_only_v2(src, a, gscfg, size):
     log(f"game only v3: band {b['band']['w']}x{b['band']['h']} ({b['band']['share']:.0%} of the "
         f"width) at canvas rows {lay['band']}, {len(b['pan'])} knot(s), action inside "
         f"{b['inside_share']}; no card; blur {blur:.0%}")
-    return {"layout": "game_only", "v2": True, "src_w": sw, "src_h": sh,
+    plan = {"layout": "game_only", "v2": True, "src_w": sw, "src_h": sh,
             "top_h": b["band"]["out_h"], "game": [b["band"]["w"], b["x_static"], False],
             "band": b["band"], "pan": b["pan"], "pan_y": b["pan_y"], "card": None,
             "band_y": band_y, "header": lay["header"],
             "card_side": None, "cap_y": lay["cap_y"], "fg_h": lay["cap_y"] - 50,
             "action": {"fps": gamelayout.TRACK_FPS, "samples": b["samples"], "peak": b["peak"],
                        "inside_share": b["inside_share"]}}
+    if cam:
+        plan.update(_mid_cam_keys(cam[1], cover, b))
+    return plan
+
+
+MID_CAM_MASK_PAD = 12      # src px the painted-out mid-frame cam reaches past its overlay
+                           # (the border line and its shadow)
+MID_CAM_MASK_MAX = 0.35    # a band window the cam would paint more of is no clean game band (a
+                           # 640x360 cam is ~31 % of a 0.50 band's 960x1080 window with its pad)
+
+
+def _mid_cam_band(src, a, sw, sh, share, guard, mask, **kw):
+    """The game band of gameplay whose cam overlay is burned in mid-frame
+    (`guard`: the cam with the v2 guard margin; `mask`: the cam to paint out). (band, None, None)
+    at an x clear of the cam's columns; else (band, cover, None) anywhere with the cam painted out
+    of it (cover: the part of `mask` its windows show, at most MID_CAM_MASK_MAX of a window); else
+    (None, None, why). The motion scan leaves the cam out either way. `kw` -> _v2_band."""
+    b = _v2_band(src, a, sw, sh, share, lambda gw: gamelayout.cam_free_ranges(sw, gw, guard),
+                 [guard], **kw)
+    if b is not None and not b["band"]["sliced"]:
+        return b, None, None
+    b = _v2_band(src, a, sw, sh, share, lambda gw: [(0, sw - gw)], [guard], **kw)
+    if b is None or b["band"]["sliced"]:
+        return None, None, f"every {share:.0%} band x slices a banner (the mid-frame cam {mask})"
+    w, h = b["band"]["w"], b["band"]["h"]
+    wins = [[x, y, x + w, y + h] for _t0, _t1, x, y in v2_views(b, a.dur)]
+    part = gamelayout.shown_part(mask, wins)
+    if part is None:
+        return b, None, None                   # the band's path leaves the cam out after all
+    share_shown = gamelayout.cover_share(part, wins)
+    if share_shown > MID_CAM_MASK_MAX:
+        return None, None, (f"the mid-frame cam {mask} would paint out {share_shown:.0%} of the "
+                            f"band (cap {MID_CAM_MASK_MAX:.0%})")
+    return dict(b, cover_share=share_shown), part, None
+
+
+def _mid_cam_keys(mask, cover, b):
+    """The plan keys of a mid-frame cam: cam_mask = the part of it painted out of the
+    band (None: the band is clear of it), cam_mask_share = its largest share of a band window."""
+    return {"cam_mid": list(mask), "cam_mask": list(cover) if cover else None,
+            "cam_mask_share": b.get("cover_share", 0.0) if cover else 0.0}
+
+
+def _mid_cam_game_only(src, a, gscfg, size, guard, mask, why):
+    """Gameplay whose mid-frame cam no gamestack band takes (`why`): game only (no card),
+    its band clear of the cam or with it painted out; RenderError (the clip is dropped) when that
+    has no clean band either: never a face crop."""
+    log(f"gamestack: {why}; game only (no card)")
+    g = _plan_game_only_v2(src, a, gscfg, size, cam=(guard, mask))
+    if g is None:
+        raise RenderError(f"gameplay: no clean game band round the mid-frame cam {list(mask)}: "
+                          f"{why}")
+    return g
 
 
 def v2_views(plan, dur, step=0.5):
@@ -1989,7 +2088,14 @@ def plan_layout(a, src):
         p = _plan_gamestack(src, a)
         if p is not None:
             return p
-        # per-clip fallback: face somewhere in the frame -> track; nothing -> game only (tight 9:16)
+        if game_band_only(a):
+            # gameplay never falls back to a face-follow crop (track
+            # centred on a cam burned in mid-frame cropped the game tight): no cam card, so the
+            # game band alone, face or no face
+            log("gamestack: gameplay with no cam card; game-only band (never a face crop)")
+            return _plan_game_only(src, a) or {"layout": "general"}
+        # per-clip fallback (a talking-head or IRL stream): face somewhere in the frame -> track;
+        # nothing -> game only (tight 9:16)
         try:
             analysed = reframe.analyze(str(src), a.start, a.dur)
         except Exception as e:
@@ -2068,8 +2174,12 @@ def blur_fill_frac(plan, a, info):
     sh = plan.get("src_h") or info.get("height")
     fill = 0.0
     if plan.get("v2"):                          # gamestack / game only v2: band + card
-        return gamelayout.fill_frac(plan["band"]["out_h"], plan.get("card"),
+        fill = gamelayout.fill_frac(plan["band"]["out_h"], plan.get("card"),
                                     plan.get("band_y", 0))
+        if plan.get("cam_mask"):                # the cam painted out of the band is no
+            fill = round(fill + float(plan.get("cam_mask_share") or 0.0)   # picture either
+                         * int(plan["band"]["out_h"]) / float(OUT_H), 3)
+        return fill
     if plan.get("manual"):
         bmode = a.bottom_mode or ("fit" if layout == "screencast" else "cover")
         if bmode == "fit":
@@ -2190,6 +2300,30 @@ def stack_allowed(a):
     if niche:
         return niche in STACK_NICHES
     return (getattr(a, "vertical", None) or "") == "stream"
+
+
+def game_band_only(a):
+    """Whether this clip is gameplay (quality_gate.gameplay_clip: a gamestack request, or a
+    gaming / stream clip whose source is gameplay by its --content-kind or the gaming niche;
+    talking heads and IRL vlogs are not). Gameplay never renders a face-follow crop: the game band
+    with the cam card, the game band alone, or no clip."""
+    from clipengine import quality_gate as qg
+    return qg.gameplay_clip(getattr(a, "vertical", None), getattr(a, "niche", None),
+                            getattr(a, "content_kind", None), getattr(a, "layout", None))
+
+
+def enforce_game_band(plan, a):
+    """The last check before the encode: a gameplay clip never renders a face-follow crop (a
+    --layout track request, or the slice ladder's speaker crop): RenderError (the clip is dropped;
+    the gate would fail it: gameplay_face_follow). The full-bleed action crop (gameplay with no
+    face, centred on the action) is no face crop."""
+    from clipengine import quality_gate as qg
+    if plan.get("manual") or not qg.face_follow(plan.get("layout"),
+                                                (plan.get("banner_guard") or {}).get("action")):
+        return
+    if game_band_only(a):
+        raise RenderError(f"gameplay planned as {plan.get('layout')!r}, a face-follow crop: "
+                          f"gameplay renders the game band (gamestack / game only) or no clip")
 
 
 def small_cam_inset(a, src, top_h):
@@ -2470,6 +2604,14 @@ def _even_in(box):
 
 def _holds(box, pt, tol=0):
     return box[0] - tol <= pt[0] <= box[2] + tol and box[1] - tol <= pt[1] <= box[3] + tol
+
+
+def _painted(win, tile, mask, tol=CAM_BOX_TOL):
+    """Whether every part of the cam's box `tile` the window `win` shows is inside the painted-out
+    `mask` (a mid-frame cam's band)."""
+    x0, y0 = max(win[0], tile[0]), max(win[1], tile[1])
+    x1, y1 = min(win[2], tile[2]), min(win[3], tile[3])
+    return x1 <= x0 or y1 <= y0 or (_holds(mask, (x0, y0), tol) and _holds(mask, (x1, y1), tol))
 
 
 def _cam_pt(ov, size):
@@ -4520,8 +4662,11 @@ def hud_layout(plan, a, src, guard, rejected):
     if why:
         rep = stack_fallback(plan, a, src, why, [], guard)
         if rep is None and no_band_stack(a) and lay not in ("gamestack", "reaction",
-                                                            "screencast_auto"):
-            rep = full_bleed_action(plan, a, src, why)      # gameplay without a cam
+                                                            "screencast_auto") \
+                and not plan.get("cam_mid"):
+            # gameplay without a cam (a mid-frame cam's 9:16 window over the activity
+            # could centre on the cam, the face crop gameplay never ships)
+            rep = full_bleed_action(plan, a, src, why)
         if rep is not None:
             return rep
         if no_band_stack(a):
@@ -5126,6 +5271,7 @@ def choose_layout(a, src, info):
             # plan is no general plan, so it never does
             guard = screen_fit_general(plan, a, src, info) or guard
     enforce_single_view(plan, a)
+    enforce_game_band(plan, a)                      # gameplay, never a face crop
     shot_text_fix(plan, a, src)                     # render yield 11-09 class 3
     cover_overlays(plan, a, src)                    # render yield 11-09 class 2 (last resort)
     try:
@@ -5163,10 +5309,13 @@ def facecam_view_check(plan, a, src):
         return None        # an unread box is no proof of a facecam: posted IRL streamers (1017,
                            # 1019, 1293) and posted gaming crops of a corner cam (1400, 1405)
     cp = _cam_pt(ov, (sw, sh))
+    mask = plan.get("cam_mask")
     for v in crop_views(plan, a.dur):
         win = [v["x"], v["y"], v["x"] + v["w"], v["y"] + v["h"]]
         if _holds(tile, win[:2], CAM_BOX_TOL) and _holds(tile, win[2:], CAM_BOX_TOL):
             continue                              # the cam panel, inside the cam's own box
+        if mask and _painted(win, tile, mask):
+            continue                              # the band shows the cam painted out
         holds = _holds(win, cp)
         if holds or cropcheck.cuts(win, tile, tol=CAM_BOX_TOL):
             raise RenderError(
@@ -5332,6 +5481,9 @@ def main(argv=None):
                 "widened_from": b.get("widened_from"), "scene_text": b.get("scene_text"),
                 "cap_y": plan["cap_y"], "knots": len(plan["pan"]),
                 "action_inside": plan["action"]["inside_share"], "peak": plan["action"]["peak"]}
+            if plan.get("cam_mid"):                     # a cam burned in mid-frame
+                rep["gamestack_v2"].update({k: plan.get(k) for k in ("cam_mid", "cam_mask",
+                                                                     "cam_mask_share")})
         if layout == DUAL_VIEW:
             rep["panels"] = dual_view_panels(plan)      # the gate's edge bands read "top"
             rep["dual_view"] = {"bottom": plan.get("bottom"), "zoom": plan.get("zoom"),
