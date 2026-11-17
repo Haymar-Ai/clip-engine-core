@@ -174,9 +174,10 @@ def test_mute_spans_and_the_audio_chain_bleep():
 def test_levels_flag_measures_any_vertical(monkeypatch):
     monkeypatch.setattr(recompose.reframe, "iter_frames", lambda *a, **k: iter(
         [(0.0, np.full((90, 160, 3), 20, np.uint8)), (1.0, np.full((90, 160, 3), 70, np.uint8))]))
-    a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--vertical", "podcast"])
+    # every known vertical is measured; --levels still measures any other one
+    a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--vertical", "campfire"])
     assert recompose.measure_levels(a, "s.mp4") is None
-    a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--vertical", "podcast", "--levels"])
+    a = recompose.parse_args(["s.mp4", "0", "3", "o.mp4", "--vertical", "campfire", "--levels"])
     assert recompose.measure_levels(a, "s.mp4") is not None
 
 

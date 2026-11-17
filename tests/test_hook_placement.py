@@ -458,11 +458,16 @@ def test_levels_feed_every_use_of_the_source_in_the_graph():
     assert recompose.with_levels("[0:v]null[v0]", None) == "[0:v]null[v0]"
 
 
-def test_levels_only_for_stream_footage(monkeypatch):
+def test_levels_for_every_vertical(monkeypatch):
+    # stream-only before; a dark studio (a podcast set) is lifted too
     dark = np.full((90, 160, 3), 25, np.uint8)
     dark[:10] = 200
     monkeypatch.setattr(recompose.reframe, "iter_frames", lambda *a, **k: iter([(0.0, dark)] * 4))
-    a = recompose.parse_args(["s.mp4", "0", "5", "o.mp4", "--vertical", "stream"])
-    assert recompose.measure_levels(a, "s.mp4")["src_luma"] < recompose.DARK_LUMA
+    for v in ("stream", "podcast", "general", None):
+        argv = ["s.mp4", "0", "5", "o.mp4"] + (["--vertical", v] if v else [])
+        assert recompose.measure_levels(recompose.parse_args(argv), "s.mp4")["src_luma"] \
+            < recompose.DARK_LUMA, v
+    bright = np.full((90, 160, 3), 120, np.uint8)
+    monkeypatch.setattr(recompose.reframe, "iter_frames", lambda *a, **k: iter([(0.0, bright)] * 4))
     a2 = recompose.parse_args(["s.mp4", "0", "5", "o.mp4", "--vertical", "podcast"])
     assert recompose.measure_levels(a2, "s.mp4") is None

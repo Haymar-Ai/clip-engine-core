@@ -2220,11 +2220,15 @@ def blur_fill_frac(plan, a, info):
     return round(fill / (OUT_W * OUT_H), 3)
 
 
-DARK_LUMA = 55.0             # a stream window darker than this (median frame luma) gets levels
+DARK_LUMA = 55.0             # a window darker than this (median frame luma) gets levels
 LEVELS_MAX_GAIN = 1.5        # mild: the white point never drops below 255 / this ...
 LEVELS_MAX_BLACK = 16.0      # ... and the black point never rises above this
 LEVELS_GAMMA = 1.15          # midtone lift, only when the stretched window is still dark
-LEVELS_VERTICALS = ("stream",)
+# every vertical, not only streams (config select.verticals + render.vertical_layouts; "" = no
+# --vertical): most too_dark rejects were dark studios (podcasts, interviews) that got no lift
+# because only stream windows were measured.
+LEVELS_VERTICALS = ("stream", "gaming", "poker", "podcast", "interview", "general", "product",
+                    "reaction", "screencast", "")
 
 
 def auto_levels(frames):
@@ -2267,7 +2271,7 @@ def with_levels(vgraph, levels_filter):
 
 
 def measure_levels(a, src, plan=None):
-    """auto_levels for a stream-vertical window (sampled at 0.5 fps, 160 px), else None.
+    """auto_levels for a LEVELS_VERTICALS window (sampled at 0.5 fps, 160 px), else None.
     --levels (repair of a too-dark reject) measures any vertical, and so does a streamer
     split (render yield 11-09: a tech screen split's game panel is the stream's dark game view,
     2876 / 2875 at median luma 29 where the gate takes 35)."""
@@ -5352,7 +5356,7 @@ def main(argv=None):
             levels = None
         if levels:
             vgraph = with_levels(vgraph, levels["filter"])
-            log(f"dark stream window (median luma {levels['src_luma']}): {levels['filter']}")
+            log(f"dark window (median luma {levels['src_luma']}): {levels['filter']}")
 
         ass_name = None
         if a.captions or a.hook:
