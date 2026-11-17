@@ -139,8 +139,10 @@
  },
  "render": {
   "crop_feasibility": {
-   "_doc": "Before select's transcribe, a niche source whose speaker crop cannot be made without slicing a graphic is dropped (render/cropcheck.probe: banners.scan at 1 fps + 3 OCR frames), and candidate spans below cropcheck.SPAN_MIN_OK are dropped before their render. dual_view_fallback_niches: the niches whose single-view clips that sliced the screen render once more as the dual view (empty: tech and finance never stack; reviewers rejected the stacked dual view on nearly every such clip).",
+   "_doc": "Before select's transcribe, a niche source whose speaker crop cannot be made without slicing a graphic is dropped (render/cropcheck.probe: banners.scan at 1 fps + 3 OCR frames per probe window), and candidate spans below cropcheck.SPAN_MIN_OK are dropped before their render. dual_view_fallback_niches: the niches whose single-view clips that sliced the screen render once more as the dual view (empty: tech and finance never stack; reviewers rejected the stacked dual view on nearly every such clip).",
+   "_window_doc": "The probe reads the source in windows of at most probe_length_s seconds (72: a harvested window, 60 s with 6 s of context each side), each with its own verdict: a source no longer than one window is probed once, a longer one is refused only when every window is, and a candidate with most of its span in a refused window is dropped before its render. Over a whole long stream a persistent cam card or logo reads as a plate on every frame and the probe refused sources whose every window crops clean.",
    "enabled": true,
+   "probe_length_s": 72,
    "dual_view_fallback_niches": []
   },
   "caption_model": "small.en",

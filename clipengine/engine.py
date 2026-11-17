@@ -483,6 +483,14 @@ _CROP = CFG.get("render", {}).get("crop_feasibility") or {}
 CROP_PROBE = bool(_CROP.get("enabled", True))
 UNCROPPABLE = "uncroppable"          # the source's error prefix when no clean crop exists
 _STACK_NICHES = ("gaming", "streamers")   # = recompose.STACK_NICHES: a dual view zoom counts
+# The probe reads one harvested window at a time, as a window runner does: it harvests windows of
+# 30-60 s with 6 s of the source kept on each side (<= 72 s) and probes each window on its own.
+# The probe's plates (text that persists on >= 60 % of the sampled frames) and its facecam are
+# window-level reads: over a whole 25-minute stream a cam card or a logo that shows on most of it
+# reads as a plate on every frame, and the source is refused although each window of it crops
+# clean. A longer source is probed as consecutive windows of at most PROBE_WINDOW_S, each with
+# its own verdict (render.crop_feasibility.probe_length_s).
+PROBE_WINDOW_S = float(_CROP.get("probe_length_s") or 72.0)
 
 
 def _cropcheck():
@@ -490,31 +498,109 @@ def _cropcheck():
     return cropcheck
 
 
+def probe_windows(dur, length=None):
+    """[(start, end)] source seconds the crop probe reads a `dur`-second source in: one window
+    (0.0, None) when it is no longer than `length` (a harvested window) or its length is unknown,
+    else ceil(dur / length) equal consecutive windows, each at most `length` long (default
+    PROBE_WINDOW_S)."""
+    length = float(length or PROBE_WINDOW_S)
+    if not dur or float(dur) <= length:
+        return [(0.0, None)]
+    n = math.ceil(float(dur) / length)
+    step = float(dur) / n
+    return [(round(k * step, 3), round(float(dur) if k == n - 1 else (k + 1) * step, 3))
+            for k in range(n)]
+
+
+def merge_window_probes(reps):
+    """One probe report for a source from its windows' reports [(start, end, report)]: the
+    windows (span, verdict, why, ok_share, verdict_frames, plates), every window's per-frame
+    verdicts in source seconds (for _drop_uncroppable_picks), and the source's verdict:
+    "uncroppable" when every window is (a window runner skips each one before select), "ok" when
+    any window is, else "unknown"."""
+    wins, verdicts = [], []
+    for a, b, rep in reps:
+        wins.append({"start": a, "end": b, "verdict": rep.get("verdict"), "why": rep.get("why"),
+                     "ok_share": rep.get("ok_share"), "verdict_frames": rep.get("verdict_frames"),
+                     "plates": rep.get("plates")})
+        verdicts += [[round(float(t) + a, 2), ok, how] for t, ok, how in rep.get("verdicts") or []]
+    share, n = _cropcheck().share_ok([tuple(v) for v in verdicts])
+    out = {"windows": wins, "verdicts": verdicts, "ok_share": share, "verdict_frames": n,
+           "frames": sum(int(rep.get("frames") or 0) for _a, _b, rep in reps),
+           "elapsed_s": round(sum(float(rep.get("elapsed_s") or 0.0) for _a, _b, rep in reps), 2)}
+    kinds = [w["verdict"] for w in wins]
+    bad, ok = kinds.count(UNCROPPABLE), kinds.count("ok")
+    if wins and bad == len(wins):
+        out.update(verdict=UNCROPPABLE,
+                   why=f"no clean crop for the speaker in any of {len(wins)} probe windows "
+                       f"(first: {wins[0]['why']})")
+    elif ok:
+        out.update(verdict="ok", why=f"clean crop in {ok} of {len(wins)} probe windows "
+                                     f"({bad} uncroppable)")
+    else:
+        out.update(verdict="unknown", why=f"no verdict in {len(wins) - bad} of {len(wins)} "
+                                          f"probe windows ({bad} uncroppable)")
+    return out
+
+
 def crop_probe(media, sid, niche):
-    """render/cropcheck.probe of a window for its niche (a dual view zoom counts in the
-    stacking niches), or None: no niche (campaign / manual sources keep today's flow), the probe
-    switched off, or the window unreadable (no verdict: the render decides as before)."""
+    """render/cropcheck.probe of a source for its niche (a dual view zoom counts in the stacking
+    niches), window by window (probe_windows), or None: no niche (manual sources keep today's
+    flow), the probe switched off, or the source unreadable (no verdict: the render decides as
+    before). A source no longer than one window gets exactly the one probe a harvested window
+    gets; a longer one, one probe per window (merge_window_probes), and a window the probe cannot
+    read has no verdict, as an unreadable harvested window."""
     if not CROP_PROBE or not niche:
         return None
-    try:
-        return _cropcheck().probe(media, 0.0, None, niche=niche, stack=niche in _STACK_NICHES)
-    except Exception as e:      # noqa: BLE001 - a probe failure never costs a window
-        _log("warn", "select", f"{sid}: crop probe failed ({type(e).__name__}: {e}); no verdict",
-             source_id=sid)
-        return None
+    stack = niche in _STACK_NICHES
+    spans = probe_windows(_media_duration(media))
+    if len(spans) == 1:
+        try:
+            return _cropcheck().probe(media, 0.0, None, niche=niche, stack=stack)
+        except Exception as e:      # noqa: BLE001 - a probe failure never costs a window
+            _log("warn", "select", f"{sid}: crop probe failed ({type(e).__name__}: {e}); no "
+                 f"verdict", source_id=sid)
+            return None
+    reps = []
+    for a, b in spans:
+        try:
+            rep = _cropcheck().probe(media, a, b - a, niche=niche, stack=stack)
+        except Exception as e:      # noqa: BLE001
+            _log("warn", "select", f"{sid}: crop probe of {a:.0f}-{b:.0f}s failed "
+                 f"({type(e).__name__}: {e}); no verdict for it", source_id=sid)
+            rep = {"verdict": "unknown", "why": f"probe failed ({type(e).__name__})",
+                   "elapsed_s": 0.0}
+        reps.append((a, b, rep))
+    probe = merge_window_probes(reps)
+    bad = [f"{w['start']:.0f}-{w['end']:.0f}s" for w in probe["windows"]
+           if w["verdict"] == UNCROPPABLE]
+    _log("info", "select", f"{sid}: crop probe in {len(spans)} windows of <= {PROBE_WINDOW_S:.0f}s: "
+         f"{probe['why']}{': ' + ', '.join(bad) if bad else ''} (probe {probe['elapsed_s']:.1f}s)",
+         source_id=sid)
+    return probe
 
 
 def _drop_uncroppable_picks(cands, probe, sid):
     """candidates whose span the probe found no clean crop for on enough of its face
     frames (< cropcheck.SPAN_MIN_OK, the 1309 class: a cover graphic sliced for 4 s) leave before
     their render, so the next candidate can take the slot. Spans with too few face frames keep
-    today's flow."""
+    today's flow. A source probed window by window: a candidate with more than half its span in
+    windows whose verdict is uncroppable leaves too (a window runner skips such a window before
+    select, so none of its spans is ever a clip)."""
     cc = _cropcheck()
     verdicts = [tuple(v) for v in (probe or {}).get("verdicts") or []]
-    if not verdicts:
+    bad = [(float(w["start"]), float(w["end"])) for w in (probe or {}).get("windows") or []
+           if w.get("verdict") == UNCROPPABLE]
+    if not verdicts and not bad:
         return cands
     kept = []
     for c in cands:
+        inside = sum(max(0.0, min(c["end"], b) - max(c["start"], a)) for a, b in bad)
+        if bad and inside > 0.5 * (c["end"] - c["start"]):
+            _log("warn", "select", f"{sid}: skipped {c['start']:.1f}-{c['end']:.1f}s before render: "
+                 f"{inside:.1f}s of it in probe windows with no clean crop for the speaker",
+                 source_id=sid)
+            continue
         share, n = cc.share_ok(verdicts, c["start"], c["end"])
         c["crop_probe"] = {"ok_share": share, "frames": n}
         if share is not None and n >= cc.MIN_VERDICT_FRAMES and share < cc.SPAN_MIN_OK:

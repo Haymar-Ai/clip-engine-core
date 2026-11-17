@@ -88,9 +88,11 @@ run otherwise keeps for all its whisper calls.
 - `layout_crops`: manual crop rectangles for the `screencast` layout.
 - `scratch_dir`: caches and working files (default `.cache/`, relative to where you run).
 
-`render.crop_feasibility` probes the whole source before transcription and refuses it when no
-clean 9:16 speaker crop exists on most sampled frames. Its thresholds are tuned for windows of a
-minute or two; a long stream with a persistent cam card or logo bug can be refused as a whole.
+`render.crop_feasibility` probes a niche source before transcription, in windows of at most
+`probe_length_s` seconds (72 by default, the length of a harvested window), each with its own
+verdict. A window with no clean 9:16 speaker crop on most of its sampled frames is refused:
+candidates with most of their span in a refused window are dropped before their render, and the
+source is skipped only when every window is refused.
 `{"render": {"crop_feasibility": {"enabled": false}}}` skips the probe; the render and the gate
 still refuse any single clip whose crop would slice a graphic.
 
