@@ -3887,12 +3887,15 @@ def render(clip):
 
 def render_meta(qc):
     """The clip's render metadata (features_json["render"]): the layout the render drew and, for
-    gamefit, the refusal it replaced, the layout that refused and the cam inset."""
+    gamefit, the refusal it replaced, the layout that refused and the cam inset (the cam region
+    covered on the frame, or the cam left in the frame with no card, and the share of sampled
+    frames the card's cut holds a whole face in)."""
     out = {"layout": (qc or {}).get("layout")}
     gf = (qc or {}).get("gamefit")
     if gf:
         out["gamefit"] = {k: gf.get(k) for k in ("replaced", "replaced_layout", "card", "cam_box",
-                                                 "shares")}
+                                                 "shares", "cam_cover", "cam_in_band",
+                                                 "card_faces")}
     return out
 
 

@@ -2352,8 +2352,9 @@ def blur_fill_frac(plan, a, info):
             fill = round(fill + float(plan.get("cam_mask_share") or 0.0)   # picture either
                          * int(plan["band"]["out_h"]) / float(OUT_H), 3)
         return fill
-    if layout == GAMEFIT:                       # gamefit: all but the frame and the card
-        return gamelayout.fit_shares(plan["frame_h"], plan.get("card"))["fill"]
+    if layout == GAMEFIT:                       # gamefit: all but the frame and the card; the
+        return gamelayout.fit_shares(           # cam covered on the frame is fill too
+            plan["frame_h"], plan.get("card"), plan.get("cam_cover_canvas"))["fill"]
     if plan.get("manual"):
         bmode = a.bottom_mode or ("fit" if layout == "screencast" else "cover")
         if bmode == "fit":
@@ -2578,7 +2579,15 @@ def keep_cam(plan, a, src):
         if plan.get("card"):
             rep.update(source_cam=list(plan["cam_box"]), how=plan.get("cam_how"),
                        inset=list(plan["card"]), over=False,
-                       why="gamefit: the cam as the inset under the captions")
+                       why="gamefit: the cam as the inset under the captions"
+                       + (", its region covered on the frame" if plan.get("cam_cover") else ""))
+        elif plan.get("cam_in_band"):
+            # no card would hold the face (the cam moves between shots): the cam is
+            # the source's own inset, shown in the frame where the source has it
+            rep.update(source_cam=list(plan["cam_box"]), how=plan.get("cam_how"),
+                       inset=list(plan["cam_in_band"]), over=True, in_band=True,
+                       why=f"gamefit: the cam in the frame, no card (a card would hold a whole "
+                           f"face in {plan['card_faces']['share']:.0%} of the sampled frames)")
         else:
             rep["why"] = "the source has no streamer cam (window and source detection)"
     elif lay == "gamestack" and plan.get("v2") and plan.get("card"):
@@ -5282,7 +5291,11 @@ def plan_gamefit(src, a, info, prior=None, cam=None):
     and the cam as the card in the bottom corner on its side (gamelayout.fit_card, cut from the cam
     box round the face: inset_crop). The cam: `cam` (a stream_cam-shaped dict), else the refused
     game plan's (`prior`), else stream_cam (the window, then the source); no cam, no card. Raises
-    RenderError when the frame is too narrow to fit or a cam cannot be placed as the inset."""
+    RenderError when the frame is too narrow to fit or a cam cannot be placed as the inset.
+    One cam on screen: the card's cam region the frame shows is covered with the frame's own fill
+    (plan["cam_cover"], gamelayout.fit_cover); a card whose crop would hold no whole face in more
+    than 20 % of the sampled frames (an edited source whose cam jumps between shots) is no card:
+    the cam stays in the frame, uncovered (plan["cam_in_band"])."""
     prior = prior or {}
     sw = int(prior.get("src_w") or info.get("width") or 0)
     sh = int(prior.get("src_h") or info.get("height") or 0)
@@ -5323,17 +5336,96 @@ def plan_gamefit(src, a, info, prior=None, cam=None):
                               f"face whole and slices no burned-in text")
         cw, ch, cx, cy = crop
         face = cam.get("face")
-        plan.update(card=list(card), card_side=side, cam=[cw, ch, cx, cy],
-                    cam_box=list(cam["box"]), cam_how=cam.get("how"),
+        plan.update(cam_box=list(cam["box"]), cam_how=cam.get("how"),
                     face_median=[face[0] / sw, face[1] / sh, face[2] / sh] if face else None)
-    sh_ = gamelayout.fit_shares(geo["fh"], plan["card"])
+        fbox = [inner["x"], inner["y"], inner["x"] + inner["w"], inner["y"] + inner["h"]] \
+            if inner else [0, 0, sw, sh]
+        seen = _cam_samples(src, a, (sw, sh), face)
+        held = gamelayout.card_face_share((seen or {}).get("faces"), [cx, cy, cx + cw, cy + ch])
+        plan["card_faces"] = {"share": held, "samples": len((seen or {}).get("faces") or []),
+                              "min": gamelayout.FIT_CARD_FACE_MIN}
+        if held is not None and held < gamelayout.FIT_CARD_FACE_MIN:
+            # the card would cut or miss the face: no card, the cam where the source shows it
+            shown = gamelayout.fit_cover(cam["box"], None, None, fbox)
+            if shown is None:
+                raise RenderError(f"gamefit: the card's cut of the cam {list(cam['box'])} holds a "
+                                  f"whole face in {held:.0%} of the sampled frames and the cam "
+                                  f"lies outside the frame shown (its bars)")
+            plan["cam_in_band"] = gamelayout.fit_canvas_box(shown, fbox, y0, geo["fh"])
+            log(f"gamefit: the card's cut {cw}x{ch} at {cx},{cy} holds a whole face in {held:.0%} "
+                f"of {plan['card_faces']['samples']} sampled frames (< "
+                f"{gamelayout.FIT_CARD_FACE_MIN:.0%}: the cam moves between shots or the cut "
+                f"misses the face): no card, the cam {plan['cam_box']} stays in the frame at "
+                f"canvas {plan['cam_in_band']}, uncovered")
+        else:
+            plan.update(card=list(card), card_side=side, cam=[cw, ch, cx, cy])
+            if held is None:
+                log("gamefit: the card's faces unread (no frames or no face detector): the card "
+                    "as cut")
+            cover = gamelayout.fit_cover(cam["box"], (seen or {}).get("rect"),
+                                         _cam_cover_items(src, a, (sw, sh)), fbox)
+            if cover:
+                plan["cam_cover"] = cover
+                plan["cam_cover_canvas"] = gamelayout.fit_canvas_box(cover, fbox, y0, geo["fh"])
+                log(f"gamefit: the cam {plan['cam_box']} the card shows is covered on the frame "
+                    f"with its fill: src {cover}, canvas {plan['cam_cover_canvas']} (overlay "
+                    f"borders {(seen or {}).get('rect')})"
+                    + (f"; the card holds a whole face in {held:.0%} of the sampled frames"
+                       if held is not None else ""))
+    sh_ = gamelayout.fit_shares(geo["fh"], plan["card"], plan.get("cam_cover_canvas"))
     log(f"gamefit: the {fw}x{fh} frame fit to width at canvas rows {geo['frame']} "
         f"({sh_['frame']:.0%}), the hook header {geo['header']}, captions y {geo['cap_y']}, "
         + (f"the cam {plan['cam_box']} ({plan['cam_how']}) as a {plan['card'][2]}x"
            f"{plan['card'][3]} inset bottom-{plan['card_side']} ({sh_['card']:.0%})"
-           if plan["card"] else "no cam (the source has no streamer cam)")
+           if plan["card"] else
+           f"the cam {plan['cam_box']} ({plan['cam_how']}) in the frame, no card"
+           if plan.get("cam_in_band") else "no cam (the source has no streamer cam)")
         + f"; blurred fill {sh_['fill']:.0%} at {plan['fill_dark']:.0%} of its brightness")
     return plan
+
+
+GAMEFIT_FACE_SAMPLES = 24       # full-size frames across the window the card's faces
+                                # are read on (facecam.sample_native)
+
+
+def _cam_samples(src, a, size, face):
+    """{"faces": per sampled frame (GAMEFIT_FACE_SAMPLES across the window) the detected face
+    boxes [x0, y0, x1, y1] src px, "rect": the cam overlay's borders round `face`
+    (gamelayout.overlay_rect; None: no face or none read)}; None when the frames cannot be read or
+    no face detector is available (the card's faces unread)."""
+    try:
+        if reframe._detector()[0] == "none":
+            return None
+        frames = facecam.sample_native(str(src), a.start, a.dur, n=GAMEFIT_FACE_SAMPLES)
+        if not frames:
+            return None
+        fh_, fw_ = frames[0].shape[:2]
+        kx, ky = size[0] / float(fw_), size[1] / float(fh_)
+        faces = [[[(f["cx"] - f["w"] / 2) * fw_ * kx, (f["cy"] - f["h"] / 2) * fh_ * ky,
+                   (f["cx"] + f["w"] / 2) * fw_ * kx, (f["cy"] + f["h"] / 2) * fh_ * ky]
+                  for f in reframe.detect_faces(fr)] for fr in frames]
+        rect = gamelayout.overlay_rect(frames, face) if face and (kx, ky) == (1.0, 1.0) else None
+        return {"faces": faces, "rect": rect}
+    except Exception as e:        # noqa: BLE001 - unread: the card as cut (QC says so)
+        log(f"gamefit: the card's faces unreadable ({type(e).__name__}: {e})")
+        return None
+
+
+def _cam_cover_items(src, a, size):
+    """The gate's text items (quality_gate.text_items: the banner scan and the OCR) of the window
+    that the cam cover may not grow over, boxes src px: each the extent of its OCR'd text
+    (quality_gate.text_extent, the dual view's text_edges rule: a line detector's box can run far
+    past its text, [0, 0, 714, 128] round a one-line notice and the top of a cam), its box
+    with no OCR; None when unreadable (the cam box alone is covered then: gamelayout.fit_cover
+    grows no side)."""
+    try:
+        from clipengine import quality_gate as qg
+        words = _ocr(src, a, size)
+        return [[int(v) for v in (qg.text_extent(it["box"], words) if words else it["box"])]
+                for it in qg.text_items(_scan(src, a, size), words)]
+    except Exception as e:        # noqa: BLE001
+        log(f"gamefit: text unreadable for the cam cover ({type(e).__name__}: {e}): the cam box")
+        return None
 
 
 def _window_luma(src, a, size):
@@ -5411,26 +5503,34 @@ def gamefit_vf(plan):
     frame stretched to the canvas (its rows top to bottom, every column: a cover crop's top rows
     were a game's flat sky, a flat band to the gate), blurred (at 1 / FILL_SCALE, as the v2 fill)
     and darkened to plan["fill_dark"] (gamelayout.fit_fill_dark); the cam card in its bottom
-    corner with the inset's light frame."""
+    corner with the inset's light frame. The cam region the card shows (plan["cam_cover_canvas"])
+    is covered on the frame with the same fill (its own rows of it), so the streamer shows once."""
     fy, fh = int(plan["frame_y"]), int(plan["frame_h"])
     fr = plan.get("frame")
     inner = f"crop={fr['w']}:{fr['h']}:{fr['x']}:{fr['y']}," if fr else ""
     fw4, fh4 = OUT_W // gamelayout.FILL_SCALE, OUT_H // gamelayout.FILL_SCALE
     k = float(plan.get("fill_dark", gamelayout.FIT_FILL_DARK))
     card = plan.get("card")
+    cover = plan.get("cam_cover_canvas") if card else None
     parts = [f"[0:v]split={3 if card else 2}[gff][gfm]" + ("[gfc]" if card else ""),
              f"[gff]{inner}scale={fw4}:{fh4},gblur=sigma={gamelayout.FILL_SIGMA},"
-             f"colorchannelmixer=rr={k}:gg={k}:bb={k},scale={OUT_W}:{OUT_H},setsar=1[gfill]",
+             f"colorchannelmixer=rr={k}:gg={k}:bb={k},scale={OUT_W}:{OUT_H},setsar=1"
+             + (",split=2[gfill][gfillc]" if cover else "[gfill]"),
              f"[gfm]{inner}scale={OUT_W}:{fh}:flags=lanczos,setsar=1[gframe]"]
     if not card:
         return ";".join(parts + [f"[gfill][gframe]overlay=0:{fy},setsar=1[v0]"])
     cw, ch, cx, cy = (int(v) for v in plan["cam"])
     kx, ky, kw, kh = (int(v) for v in card)
-    return ";".join(parts + [
-        f"[gfc]crop={cw}:{ch}:{cx}:{cy},scale={kw}:{kh}:flags=lanczos,setsar=1,"
-        f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t={gamelayout.INSET_BORDER}[gcard]",
-        f"[gfill][gframe]overlay=0:{fy}[gfa]",
-        f"[gfa][gcard]overlay={kx}:{ky},setsar=1[v0]"])
+    parts.append(f"[gfc]crop={cw}:{ch}:{cx}:{cy},scale={kw}:{kh}:flags=lanczos,setsar=1,"
+                 f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t={gamelayout.INSET_BORDER}[gcard]")
+    if cover:
+        vx, vy, vw, vh = (int(v) for v in cover)
+        parts += [f"[gfillc]crop={vw}:{vh}:{vx}:{vy}[gcov]",
+                  f"[gfill][gframe]overlay=0:{fy}[gfb]",
+                  f"[gfb][gcov]overlay={vx}:{vy}[gfa]"]
+    else:
+        parts.append(f"[gfill][gframe]overlay=0:{fy}[gfa]")
+    return ";".join(parts + [f"[gfa][gcard]overlay={kx}:{ky},setsar=1[v0]"])
 
 
 def gamefit_instead(a, src, info, err, prior=None):
@@ -6328,7 +6428,12 @@ def main(argv=None):
                                   header=plan["header"], cap_y=plan["cap_y"], card=plan.get("card"),
                                   cam_box=plan.get("cam_box"), cam_how=plan.get("cam_how"),
                                   bars=(plan.get("frame") or {}).get("bars"),
-                                  shares=gamelayout.fit_shares(plan["frame_h"], plan.get("card")))
+                                  cam_cover=plan.get("cam_cover"),       # one cam on screen
+                                  cam_cover_canvas=plan.get("cam_cover_canvas"),
+                                  cam_in_band=plan.get("cam_in_band"),
+                                  card_faces=plan.get("card_faces"),
+                                  shares=gamelayout.fit_shares(plan["frame_h"], plan.get("card"),
+                                                               plan.get("cam_cover_canvas")))
         if layout == DUAL_VIEW:
             rep["panels"] = dual_view_panels(plan)      # the gate's edge bands read "top"
             rep["dual_view"] = {"bottom": plan.get("bottom"), "zoom": plan.get("zoom"),

@@ -611,14 +611,110 @@ def fit_fill_dark(luma):
     return round(1.0 - (1.0 - FIT_FILL_DARK) * (float(luma) - lo) / (FIT_DARK_LUMA - lo), 3)
 
 
-def fit_shares(fh, card=None):
-    """{"frame", "card", "fill"}: canvas shares of the fit frame, the cam card and the blurred,
-    darkened fill (all the rest; the card never overlaps the frame)."""
+def fit_shares(fh, card=None, cover=None):
+    """{"frame", "card", "cover", "fill"}: canvas shares of the fit frame (less its covered cam),
+    the cam card, the cam region covered on the frame (`cover`, [x, y, w, h] canvas px)
+    and the blurred, darkened fill (all the rest, the cover too; the card never overlaps the
+    frame)."""
     canvas = float(OUT_W * OUT_H)
-    frame = OUT_W * int(fh)
+    cv = int(cover[2]) * int(cover[3]) if cover else 0
+    frame = OUT_W * int(fh) - cv
     cd = int(card[2]) * int(card[3]) if card else 0
     return {"frame": round(frame / canvas, 3), "card": round(cd / canvas, 3),
+            "cover": round(cv / canvas, 3),
             "fill": round(max(0.0, 1.0 - (frame + cd) / canvas), 3)}
+
+
+# One cam on screen: a source with its own burned-in cam showed the streamer twice (the cam in
+# the fit frame and the card), and an edited source whose cam jumps between a corner cam and a
+# zoomed one got a static card that cut or missed the face. The rule for gaming: the game zoomed
+# out, the streamer cam as ONE small bottom-corner inset. The card's cam region is covered on the
+# frame with the frame's own fill; a card that would not hold a whole face in more than 20 % of
+# the sampled frames is no card: the cam stays in the frame where the source has it, uncovered.
+FIT_CARD_FACE_MIN = 0.80   # the card's crop holds a whole detected face in this share of the samples
+FIT_FACE_TOL = 0.10        # face heights a face box may reach past the crop and still be whole in
+                           # it (the detector's box edges jitter by a few px)
+FIT_COVER_REACH = 0.25     # of the cam box's side: the overlay's own border (overlay_rect) or the
+                           # frame edge at most this far past a side takes the cover to it (a
+                           # cam box stopped 52 px short of its overlay's left border, another
+                           # 38 px short of the frame edge its cam is docked on)
+FIT_COVER_PAD = 6          # src px the cover reaches past the cam (the overlay's border line)
+
+
+def face_in(face, crop, tol=FIT_FACE_TOL):
+    """Whether the face box [x0, y0, x1, y1] lies whole in the crop [x0, y0, x1, y1] (src px), each
+    side allowed `tol` face heights past it."""
+    pad = tol * (float(face[3]) - float(face[1]))
+    return face[0] >= crop[0] - pad and face[1] >= crop[1] - pad and \
+        face[2] <= crop[2] + pad and face[3] <= crop[3] + pad
+
+
+def card_face_share(samples, crop, tol=FIT_FACE_TOL):
+    """The share of the sampled frames in which the card's crop [x0, y0, x1, y1] (src px) holds a
+    whole face (face_in); `samples` holds per frame the detected face boxes [x0, y0, x1, y1] src
+    px. None with no samples (unmeasured)."""
+    if not samples:
+        return None
+    held = sum(1 for faces in samples if any(face_in(f, crop, tol) for f in faces))
+    return round(held / float(len(samples)), 3)
+
+
+def _meets(a, b):
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def fit_cover(cam_box, rect, items, frame, reach=FIT_COVER_REACH, pad=FIT_COVER_PAD):
+    """[x0, y0, x1, y1] src px of the cam region a gamefit frame covers (its card shows it): the cam
+    box, each side moved out to the overlay's own border (`rect`, overlay_rect's; None: unread),
+    then to the frame edge, when that is at most `reach` of the box's side past it, then `pad` past
+    the cam (its border line). A side grows only over rows / columns that hold no text item
+    (`items`: [x0, y0, x1, y1] src px; None: unread, no side grows), so no HUD, chat or minimap next
+    to the cam is hidden; text running only `pad` under the cover's edge does not stop a side along
+    it. Cut to the frame shown (`frame` [x0, y0, x1, y1]); None when the cam lies outside it (in the
+    source's bars)."""
+    box = [int(v) for v in cam_box]
+    bw, bh = box[2] - box[0], box[3] - box[1]
+
+    def grow(cur, side, to):
+        new = list(cur)
+        new[side] = int(to)
+        a = 1 if side in (0, 2) else 0          # the axis the strip runs along (rows: 1)
+        strip = [min(cur[side], new[side]), cur[1], max(cur[side], new[side]), cur[3]] if a else \
+            [cur[0], min(cur[side], new[side]), cur[2], max(cur[side], new[side])]
+        if strip[2] - strip[0] <= 0 or strip[3] - strip[1] <= 0:
+            return cur
+        # text reaching only `pad` into the cover's first / last rows (columns) runs under the
+        # cam's edge, as a chat under the cam: the strip along them hides no new line of it
+        hit = [it for it in items if _meets(strip, it) and
+               not (it[a + 2] <= cur[a] + pad or it[a] >= cur[a + 2] - pad)]
+        return cur if hit else new
+
+    out = list(box)
+    for side, lim in ((0, bw), (1, bh), (2, bw), (3, bh)) if items is not None else ():
+        for to in ([rect[side]] if rect else []) + [frame[side]]:
+            past = box[side] - int(to) if side < 2 else int(to) - box[side]
+            if 0 < past <= reach * lim:
+                out = grow(out, side, to)
+    for side in range(4) if items is not None else ():
+        out = grow(out, side, out[side] - pad if side < 2 else out[side] + pad)
+    fx0, fy0, fx1, fy1 = (int(v) for v in frame)
+    out = [max(out[0], fx0), max(out[1], fy0), min(out[2], fx1), min(out[3], fy1)]
+    return out if out[2] - out[0] > 0 and out[3] - out[1] > 0 else None
+
+
+def fit_canvas_box(box, frame, frame_y, fh):
+    """[x, y, w, h] canvas px (even, grown to whole px) of the src box [x0, y0, x1, y1] on a gamefit
+    frame: the src frame `frame` [x0, y0, x1, y1] shown OUT_W wide at canvas rows frame_y ..
+    frame_y + fh."""
+    fx0, fy0, fx1, fy1 = (float(v) for v in frame)
+    kx, ky = OUT_W / (fx1 - fx0), float(fh) / (fy1 - fy0)
+    x0 = int(math.floor((float(box[0]) - fx0) * kx))
+    y0 = int(math.floor((float(box[1]) - fy0) * ky))
+    x1 = int(math.ceil((float(box[2]) - fx0) * kx))
+    y1 = int(math.ceil((float(box[3]) - fy0) * ky))
+    x0, y0 = max(0, x0 - x0 % 2), max(0, y0 - y0 % 2)
+    x1, y1 = min(OUT_W, x1 + x1 % 2), min(int(fh), y1 + y1 % 2)
+    return [x0, int(frame_y) + y0, x1 - x0, y1 - y0]
 
 
 # ---------------------------------------------------------------- action

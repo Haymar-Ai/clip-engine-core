@@ -73,6 +73,9 @@ def rig(monkeypatch):
     monkeypatch.setattr(recompose, "_ocr", lambda src, a, size: [])
     monkeypatch.setattr(recompose, "source_bars", lambda src, a, sw, sh: None)
     monkeypatch.setattr(recompose, "stream_cam", lambda src, a, size: state["stream_cam"])
+    # the face read of the card (tests/test_gamefit_cam.py): unread here, the card as cut (its
+    # cam region still covered on the frame)
+    monkeypatch.setattr(recompose, "_cam_samples", lambda src, a, size, face: None)
     gs = {"v2": True, "game_share": 0.50, "cam_max_area": 0.12, "game_only_share": 0.42,
           "header_h": 200}
     monkeypatch.setattr(recompose, "_gamestack_cfg", lambda: dict(gs))
@@ -280,10 +283,14 @@ def test_gamefit_renders_the_whole_frame_the_card_and_a_darkened_fill(tmp_path, 
          "scale=1080:608", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], capture_output=True,
         check=True).stdout, np.uint8).reshape(608, 1080, 3).astype(int)
     y0 = plan["frame_y"]
-    assert np.abs(img[y0 + 4:y0 + 604] - fr[4:604]).mean() < 6     # the whole frame, unscaled crop
+    vx, vy, vw, vh = plan["cam_cover_canvas"]                  # the cam covered
+    shown = np.ones((600, 1080), bool)
+    shown[max(0, vy - y0 - 4 - 2):vy - y0 - 4 + vh + 2, :vx + vw + 2] = False
+    assert np.abs(img[y0 + 4:y0 + 604] - fr[4:604])[shown].mean() < 6   # the whole frame, uncut
     magenta = (img[..., 2] > 200) & (img[..., 1] < 80) & (img[..., 0] > 200)
     kx, ky, kw, kh = plan["card"]
     assert magenta[ky + 20:ky + kh - 20, kx + 20:kx + kw - 20].mean() > 0.9   # the cam card
+    assert not magenta[y0:y0 + 608].any()                      # ... and only there
     fill = img[gl.FIT_HOOK_TOP - 100:gl.FIT_HOOK_TOP, 300:800]       # header rows: the fill
     assert fill.mean() < fr.mean() * 0.85 and fill.mean() > 5      # darkened, never black
     assert recompose.crop_views(plan, 3.0) == [{"t0": 0.0, "t1": 3.0, "x": float(plan["cam"][2]),
@@ -291,7 +298,7 @@ def test_gamefit_renders_the_whole_frame_the_card_and_a_darkened_fill(tmp_path, 
                                                 "w": float(plan["cam"][0]),
                                                 "h": float(plan["cam"][1])}]
     assert recompose.blur_fill_frac(plan, _args(src), {}) == \
-        gl.fit_shares(608, plan["card"])["fill"]
+        gl.fit_shares(608, plan["card"], plan["cam_cover_canvas"])["fill"]
 
 
 # ---------------------------------------------------------------- the gate
