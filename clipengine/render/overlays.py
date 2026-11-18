@@ -22,6 +22,10 @@ The crop rule (recompose): every overlay is whole in a crop window or out of it 
 reads them as no_slice regions); one a final window still cuts is covered: the part of it the
 window shows is painted out of the source before the crop (delogo: filled from the picture around
 it, `cover_graph`), so no partial logo reaches the canvas.
+
+An overlay inside a still UI panel that runs off the frame (a game's in-game phone, docked at
+the bottom right) gives that panel too (docked_panels): the streamer card split leaves it out
+first, and a gamestack band that shows it takes such a split (recompose.hud_layout).
 """
 SAMPLE_FPS = 1.0
 SCAN_W = 640
@@ -48,6 +52,13 @@ PAD = 3                      # src px kept above / below an overlay's glyphs (cr
                              # a bug sits a few px over a guest's cap (2889), every px counts ...
 PAD_X = 10                   # ... and beside them: a glyph's outer stroke reads fainter than its
                              # edges (2889's NIGHT CAP: a crop at the box's edge cut the N)
+PANEL_FILL = 0.8             # a still UI panel round an overlay (an in-game phone): its still
+                             # pixels fill >= this share of their box (a solid plate) ...
+PANEL_GROW = 2.0             # ... a box >= this x the overlay's (a plate round the glyphs) ...
+PANEL_MAX_W = 0.4            # ... and at most this share of the frame width and height (a still
+PANEL_MAX_H = 0.4            # game scene or a letterbox bar is no panel)
+PANEL_PAD = 6                # src px kept round a panel (its soft, rounded edge)
+OFF_FRAME = 16               # src px a docked panel's box runs past the frame edge it touches
 
 
 def find(grays, src_w, src_h):
@@ -115,12 +126,61 @@ def _dense_rows(profile):
     return walk(peak, -1), walk(peak, 1) + 1
 
 
-def scan(src, start, dur, src_w, src_h):
-    """`find` on the clip window's frames (SAMPLE_FPS, SCAN_W wide)."""
+def docked_panels(grays, found, src_w, src_h):
+    """[x0, y0, x1, y1] src px of the still UI panels holding overlays `found` (find's items) that
+    run off a frame edge. An in-game phone docked at the bottom right with its lower half under the
+    frame: find reads only its call card's rows nearest the bottom edge, so a crop kept that box
+    whole or out and still showed the phone's top (its status bar, its bezel) on the crop's edge.
+    The panel: the connected still pixels (luma std across the frames <= STILL_STD) holding most
+    of the overlay's, a solid plate (PANEL_FILL of its box) PANEL_GROW x the overlay's box or
+    more, at most PANEL_MAX_W x PANEL_MAX_H of the frame, touching a frame edge; padded PANEL_PAD,
+    the sides on the frame edge pushed OFF_FRAME past it, so no crop window holds it whole
+    (cropcheck.cuts): a window leaves it out or cuts it."""
+    import math
+    import cv2
+    import numpy as np
+    if len(grays) < MIN_FRAMES or not found:
+        return []
+    S = np.std(np.stack([np.asarray(g, np.float32) for g in grays]), axis=0)
+    _n, lab, st, _c = cv2.connectedComponentsWithStats((S <= STILL_STD).astype(np.uint8))
+    h, w = S.shape
+    kx, ky = src_w / float(w), src_h / float(h)
+    out = []
+    for o in found:
+        b = o["box"]
+        sx0, sy0 = int(b[0] / kx), int(b[1] / ky)
+        sx1, sy1 = max(sx0 + 1, int(math.ceil(b[2] / kx))), max(sy0 + 1, int(math.ceil(b[3] / ky)))
+        ids, counts = np.unique(lab[sy0:sy1, sx0:sx1], return_counts=True)
+        if not (ids > 0).any():
+            continue
+        i = int(ids[ids > 0][np.argmax(counts[ids > 0])])
+        x, y, bw, bh, area = (int(v) for v in st[i])
+        if area < PANEL_FILL * bw * bh or bw * bh < PANEL_GROW * (sx1 - sx0) * (sy1 - sy0) or \
+                bw > PANEL_MAX_W * w or bh > PANEL_MAX_H * h:
+            continue
+        edge = (x <= 0, y <= 0, x + bw >= w, y + bh >= h)
+        if not any(edge):
+            continue
+        box = [max(0, int(x * kx) - PANEL_PAD), max(0, int(y * ky) - PANEL_PAD),
+               min(int(src_w), int(round((x + bw) * kx)) + PANEL_PAD),
+               min(int(src_h), int(round((y + bh) * ky)) + PANEL_PAD)]
+        box = [-OFF_FRAME if edge[0] else box[0], -OFF_FRAME if edge[1] else box[1],
+               int(src_w) + OFF_FRAME if edge[2] else box[2],
+               int(src_h) + OFF_FRAME if edge[3] else box[3]]
+        if box not in out:
+            out.append(box)
+    return out
+
+
+def scan(src, start, dur, src_w, src_h, panels=False):
+    """`find` on the clip window's frames (SAMPLE_FPS, SCAN_W wide); with `panels` the boxes of
+    the docked UI panels round them (docked_panels) instead."""
     import cv2
     from clipengine.render import reframe
     grays = [cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY) for _t, fr in reframe.iter_frames(
         str(src), start, dur, fps=SAMPLE_FPS, width=SCAN_W, src_size=(int(src_w), int(src_h)))]
+    if panels:
+        return docked_panels(grays, find(grays, src_w, src_h), src_w, src_h)
     return find(grays, src_w, src_h)
 
 

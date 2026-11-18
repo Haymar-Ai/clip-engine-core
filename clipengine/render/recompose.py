@@ -2925,6 +2925,24 @@ def _overlays(src, a, size):
     return _SCANS[key]
 
 
+def _docked_panels(src, a, size):
+    """The still UI panels round the window's corner overlays that run off a frame edge
+    (overlays.docked_panels: an in-game phone at the bottom right), boxes src px with that side
+    past the frame, once per render; [] outside the daily niches or when unreadable."""
+    if not getattr(a, "niche", None):
+        return []
+    key = ("docked_panels", str(src), float(a.start), float(a.dur), tuple(size))
+    if key not in _SCANS:
+        try:
+            _SCANS[key] = overlays.scan(src, a.start, a.dur, *size, panels=True)
+        except Exception as e:    # noqa: BLE001 - unreadable: the band as planned
+            log(f"overlays: panels unreadable ({type(e).__name__}: {e})")
+            _SCANS[key] = []
+        if _SCANS[key]:
+            log(f"overlays: UI panel(s) running off the frame {_SCANS[key]}")
+    return _SCANS[key]
+
+
 def cover_overlays(plan, a, src):
     """render yield 11-09 class 2, the last resort: a static corner overlay a final crop window
     still cuts (no shift kept it whole or out) is covered: plan["cover"] holds the part of it the
@@ -4692,20 +4710,22 @@ SPLIT_CARD_BAND_H = (1214, 1280, 1350, 1446)   # the card split's game band heig
                                                # takes the rows under it (>= 234: 416x234)
 
 
-def _split_card_plan(src, a, sw, sh, box, face, guard, plates, prefer_x, centre):
+def _split_card_plan(src, a, sw, sh, box, face, guard, plates, prefer_x, centre, docked=()):
     """Path (d): the streamer split of a stream / gaming clip on the v3 canvas: the
     split's game window (split_game_window: every plate whole or out, the cam out, the frame's
     centre kept first, then nearest the activity) as a static band under the hook header, the cam
     (`box`, `face` normalized) as the card in the bottom corner under it (gamelayout.inset_ok),
-    not a full-width cam panel. None when no band height has a clean game window."""
+    not a full-width cam panel. The `docked` UI panels running off the frame (_docked_panels: an
+    in-game phone) are left out first (a window holding only their text plates whole showed the
+    phone's top on the band's bottom edge). None when no band height has a clean game window."""
     knobs = _v2_cfg(_gamestack_cfg())
     band_y = knobs["header_h"]
     side = "left" if box[0] + box[2] < sw else "right"
     fpx = (face[0] * sw, face[1] * sh, face[2] * sh) if face else None
-    for ctr in (centre, None):
+    pls = (plates + [list(b) for b in docked], plates) if docked else (plates,)
+    for pl, ctr in [(p, c) for p in pls for c in (centre, None)]:
         for gh in SPLIT_CARD_BAND_H:
-            gw = split_game_window(gh, guard, plates, sw, sh, sw / 2.0 if ctr else prefer_x, None,
-                                   ctr)
+            gw = split_game_window(gh, guard, pl, sw, sh, sw / 2.0 if ctr else prefer_x, None, ctr)
             if gw is None:
                 continue
             w, h, x, y = gw
@@ -4722,7 +4742,8 @@ def _split_card_plan(src, a, sw, sh, box, face, guard, plates, prefer_x, centre)
             lay["cap_y"] = _v3_caption_y(src, a, (sw, sh), band, lay)
             log(f"streamer split (card): game {w}x{h} at {x},{y} as the band at canvas rows "
                 f"{lay['band']}, the cam {box} as a {card[0]}x{card[1]} card bottom-{side} "
-                f"({gamelayout.inset_area(lay['card']):.0%}); {len(plates)} plate(s) whole or out")
+                f"({gamelayout.inset_area(lay['card']):.0%}); {len(plates)} plate(s) whole or out"
+                + (f", the UI panel(s) {docked} out" if pl is not plates else ""))
             return {"layout": "gamestack", "v2": True, "streamer_split": True,
                     "src_w": sw, "src_h": sh, "top_h": out_h, "game": [w, x, False],
                     "game_box": [w, h, x, y], "band": band, "pan": [[0.0, x]], "pan_y": None,
@@ -4808,7 +4829,8 @@ def plan_streamer_split(src, a, prior=None):
         prefer_x = (guard[2] + sw) / 2.0 if guard[0] + guard[2] < sw else guard[0] / 2.0
     centre = (sw / 2.0, SPLIT_CENTRE, SPLIT_CENTRE_TOP)
     if card_split:
-        return _split_card_plan(src, a, sw, sh, box, face, guard, plates, prefer_x, centre)
+        return _split_card_plan(src, a, sw, sh, box, face, guard, plates, prefer_x, centre,
+                                _docked_panels(src, a, (sw, sh)))
     want = _even(min(max(OUT_W * (box[3] - box[1]) / float(box[2] - box[0]), SPLIT_CAM_MIN_H),
                      SPLIT_CAM_MAX_H))
     heights = sorted(set(range(SPLIT_CAM_MIN_H, SPLIT_CAM_MAX_H + 1, SPLIT_CAM_STEP)) | {want},
@@ -4836,15 +4858,28 @@ def plan_streamer_split(src, a, prior=None):
     return None
 
 
-def to_streamer_split(plan, a, src, why, tried=None, guard=None):
+def _band_shows(plan, a, boxes):
+    """The boxes (src px) a v2 band's window (or a split's game window) shows part of anywhere on
+    its path (cropcheck.cuts: a docked panel's box runs past the frame, so any of it shown is cut)."""
+    gw, ch = int(plan["band"]["w"]), int(plan["band"]["h"])
+    return [list(b) for b in boxes if any(cropcheck.cuts([x, y, x + gw, y + ch], b)
+                                          for _t0, _t1, x, y in v2_views(plan, a.dur))]
+
+
+def to_streamer_split(plan, a, src, why, tried=None, guard=None, keep_out=()):
     """Replace `plan` (in place) with the streamer split and return its report (stored as
-    plan["banner_guard"]), or None (no facecam inset or no clean split: the plan stands)."""
+    plan["banner_guard"]), or None (no facecam inset or no clean split: the plan stands). With
+    `keep_out` (src px boxes) a split whose game window shows any of them is no split either."""
     try:
         sp = plan_streamer_split(src, a, prior=plan)
     except Exception as e:        # noqa: BLE001 - the planned layout stands
         log(f"streamer split: planning failed ({type(e).__name__}: {e})")
         return None
     if sp is None:
+        return None
+    if keep_out and _band_shows(sp, a, keep_out):
+        log(f"streamer split: its game window shows {_band_shows(sp, a, keep_out)}; the "
+            f"{plan.get('layout')} stands")
         return None
     rep = {"action": "streamer_split", "layout": "gamestack", "why": why,
            "tried": list(tried or []), "replaced": plan.get("layout"),
@@ -5126,6 +5161,16 @@ def hud_layout(plan, a, src, guard, rejected):
                               f"no clean streamer split or full-bleed crop")
     if rejected:
         raise RenderError(rejected)
+    if lay == "gamestack" and plan.get("v2") and not plan.get("streamer_split") and \
+            no_band_stack(a) and cam_rule(a):
+        # a band that shows a UI panel running off the frame (an in-game phone along its bottom
+        # edge) takes the streamer split whose game window leaves it out; none: as is
+        shown = _band_shows(plan, a, _docked_panels(src, a, (plan["src_w"], plan["src_h"])))
+        if shown:
+            rep = to_streamer_split(plan, a, src, f"the game band shows the UI panel(s) {shown} "
+                                    f"running off the frame", [], guard, keep_out=shown)
+            if rep is not None:
+                return rep
     return guard
 
 
