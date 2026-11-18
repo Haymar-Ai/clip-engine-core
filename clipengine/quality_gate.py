@@ -64,7 +64,7 @@ NONE_RETRY_SCALES = (0.5, 1 / 3)
 # Rendered layouts with no subject crop: the full source frame (``general``) or a game-only
 # crop. Nothing in the render can lose a speaker, so a no-face frame is not a failure there;
 # edge-cut faces still fail.
-NO_SPEAKER_LAYOUTS = ("general", "game_only")
+NO_SPEAKER_LAYOUTS = ("general", "game_only", "gamefit")
 # The speaker crop a talk clip renders as; with no campaign layout its frame gate reads config
 # quality_gate.layouts.track (edge-cut transitions, >= 1 s cutaways)
 PLAIN_TRACK_LAYOUT = "track"
@@ -2268,6 +2268,18 @@ VQ_MIN_LUMA = 35.0                   # median frame mean luma (0-255)
 VQ_MIN_CONTRAST = 30.0               # median frame luma std
 VQ_MIN_SHARPNESS = 400.0             # median variance of the Laplacian (540 px wide)
 VQ_MAX_BLUR_FILL = 0.5               # blurred letterbox / pillarbox fill share of the canvas
+# gamefit, the whole game frame fit to the canvas width where every crop of a gaming / stream
+# window slices its HUD (recompose.plan_gamefit), is a blurred, darkened fill round the frame by
+# construction: a 16:9 frame is 68 % fill with no cam card, 56 % with one. The 0.5 cap measured
+# how much of a crop's box was fill; gamefit's own cap takes a 16:9 frame and refuses a wider
+# strip. Luma, contrast and sharpness are unchanged.
+VQ_MAX_BLUR_FILL_BY_LAYOUT = {"gamefit": 0.70}
+
+
+def blur_fill_layout_kw(layout):
+    """measure_visual_quality's `layout` kwarg for a rendered layout with its own blur-fill cap
+    (VQ_MAX_BLUR_FILL_BY_LAYOUT), {} for every other layout (the call as it was)."""
+    return {"layout": layout} if layout in VQ_MAX_BLUR_FILL_BY_LAYOUT else {}
 
 
 def frame_visual_stats(gray):
@@ -2284,9 +2296,10 @@ def frame_visual_stats(gray):
             "sharpness": float(cv2.Laplacian(g, cv2.CV_32F, ksize=3).var())}
 
 
-def visual_quality_verdict(stats, blur_fill_frac=None, sliver_frac=None):
+def visual_quality_verdict(stats, blur_fill_frac=None, sliver_frac=None, layout=None):
     """Collapse per-frame stats (+ the layout's blur-fill share) to the measure dict. Pure:
-    tests feed synthetic stats.
+    tests feed synthetic stats. The blur-fill cap is VQ_MAX_BLUR_FILL, the rendered `layout`'s
+    own in VQ_MAX_BLUR_FILL_BY_LAYOUT (gamefit).
 
     Broadcast gate 10-21: under a blurred pad the sliced neighbouring video boxes the canvas keeps
     (`sliver_frac`, measure_boxed_slices) are not content either: 534's 0.488 blurred fill kept
@@ -2295,6 +2308,7 @@ def visual_quality_verdict(stats, blur_fill_frac=None, sliver_frac=None):
     import numpy as np
     if not stats:
         return {"passed": None, "reason": "no frames read"}
+    max_fill = VQ_MAX_BLUR_FILL_BY_LAYOUT.get(layout or "", VQ_MAX_BLUR_FILL)
     med = {k: float(np.median([s[k] for s in stats])) for k in ("luma", "contrast", "sharpness")}
     slivers = 0.0
     if blur_fill_frac is not None and float(blur_fill_frac) > 0 and sliver_frac:
@@ -2308,14 +2322,14 @@ def visual_quality_verdict(stats, blur_fill_frac=None, sliver_frac=None):
     if med["sharpness"] < VQ_MIN_SHARPNESS:
         errors.append(f"blurry: median Laplacian var {med['sharpness']:.0f} < "
                       f"{VQ_MIN_SHARPNESS:.0f}")
-    if blur_fill_frac is not None and float(blur_fill_frac) > VQ_MAX_BLUR_FILL:
+    if blur_fill_frac is not None and float(blur_fill_frac) > max_fill:
         errors.append(f"blurred fill covers {float(blur_fill_frac):.0%} of the canvas "
-                      f"(> {VQ_MAX_BLUR_FILL:.0%})")
-    elif slivers and float(blur_fill_frac) + slivers > VQ_MAX_BLUR_FILL:
+                      f"(> {max_fill:.0%})")
+    elif slivers and float(blur_fill_frac) + slivers > max_fill:
         errors.append(f"blurred fill and sliced neighbour boxes cover "
                       f"{float(blur_fill_frac) + slivers:.0%} of the canvas (fill "
                       f"{float(blur_fill_frac):.0%} + sliced boxes {slivers:.0%}; "
-                      f"> {VQ_MAX_BLUR_FILL:.0%})")
+                      f"> {max_fill:.0%})")
     return {"passed": not errors, "errors": errors, "frames": len(stats),
             "luma": round(med["luma"], 1), "contrast": round(med["contrast"], 1),
             "sharpness": round(med["sharpness"], 1),
@@ -2323,12 +2337,14 @@ def visual_quality_verdict(stats, blur_fill_frac=None, sliver_frac=None):
             "sliver_frac": round(slivers, 3) if slivers else None,
             "thresholds": {"min_luma": VQ_MIN_LUMA, "min_contrast": VQ_MIN_CONTRAST,
                            "min_sharpness": VQ_MIN_SHARPNESS,
-                           "max_blur_fill": VQ_MAX_BLUR_FILL}}
+                           "max_blur_fill": max_fill}}
 
 
-def measure_visual_quality(video_path, blur_fill_frac=None, fps=VQ_SAMPLE_FPS, sliver_frac=None):
+def measure_visual_quality(video_path, blur_fill_frac=None, fps=VQ_SAMPLE_FPS, sliver_frac=None,
+                           layout=None):
     """Brightness / contrast / sharpness of the rendered mp4, plus the blur-fill rule (sliced
-    neighbour boxes under a blurred pad count as fill: visual_quality_verdict)."""
+    neighbour boxes under a blurred pad count as fill: visual_quality_verdict; `layout` = the
+    rendered layout, for its cap)."""
     try:
         import numpy as np
         import cv2  # noqa: F401
@@ -2348,7 +2364,7 @@ def measure_visual_quality(video_path, blur_fill_frac=None, fps=VQ_SAMPLE_FPS, s
             if len(buf) < size:
                 break
             stats.append(frame_visual_stats(np.frombuffer(buf, np.uint8).reshape(th, VQ_SCAN_W)))
-    return visual_quality_verdict(stats, blur_fill_frac, sliver_frac)
+    return visual_quality_verdict(stats, blur_fill_frac, sliver_frac, layout=layout)
 
 
 # ---------------------------------------------------------------- measurement: flat edge band
@@ -2450,6 +2466,17 @@ def measure_edge_bands(video_path, fps=EDGE_BAND_FPS, width=EDGE_BAND_SCAN_W):
 # deliberate crop of what the top panel shows whole: its windows (crop views "panel": "zoom")
 # and edges are not read. No threshold changes for any other layout.
 DUAL_VIEW_LAYOUT = "dual_view"
+# gamefit shows the whole source frame (inside its bars) fit to the canvas width: no edge
+# of a crop of ours runs through it, so text the source itself runs into its frame edge is shown as
+# the stream shows it, not cut; crop_slices counts only what a crop window slices (the cam card's
+# cut of the cam box) for it. The frame-edge rule measured crop windows reaching the frame edge.
+GAMEFIT_LAYOUT = "gamefit"
+
+
+def frame_edges_cut(layout=None):
+    """Whether crop_slices counts text running into the source frame edge for a render of `layout`
+    (every layout but gamefit)."""
+    return layout != GAMEFIT_LAYOUT
 
 
 def slice_views(views, layout=None):
@@ -2645,14 +2672,15 @@ def text_extent(box, words, pad=4):
 
 
 def crop_slices(sc, views, dur, words=None, min_alnum=SLICE_MIN_ALNUM, edge_px=SLICE_EDGE_PX,
-                text_edges=False):
+                text_edges=False, frame_edges=True):
     """Pure: cut text items of scan ``sc`` (banners.scan dict) + OCR ``words`` under the crop
     ``views`` (recompose.crop_views; [] = whole frames on screen). Returns
     [{"box", "frac", "banner", "share", "how", "alnum"}], biggest share first, ``how`` "crop"
     (a window slices it) or "frame" (it runs into the source frame edge, on screen).
     ``text_edges`` (the dual view): an item runs into the frame edge only where its OCR'd text
     does (text_extent), not its line-detector box (10-21 clip 377: the FIELD and board graphics
-    end 10-35 px inside the frame, their detector boxes at its edge)."""
+    end 10-35 px inside the frame, their detector boxes at its edge). ``frame_edges`` False
+    (gamefit: frame_edges_cut): no "frame" cuts, only what a window slices."""
     from clipengine.render import banners
     sw, sh = sc["src_w"], sc["src_h"]
     tol_y = banners.SLICE_TOL_FRAC * sh
@@ -2673,8 +2701,9 @@ def crop_slices(sc, views, dur, words=None, min_alnum=SLICE_MIN_ALNUM, edge_px=S
             if banners.sliced(it["box"], vx, vw, sw) or y0 < vy - tol_y or \
                     y1 > vy + vh + tol_y:
                 crop.append(span)
-            elif (edges["left"] and vx <= edge_px) or (edges["right"] and vx + vw >= sw - edge_px) \
-                    or (edges["top"] and vy <= edge_px) or (edges["bottom"] and vy + vh >= sh - edge_px):
+            elif frame_edges and (
+                    (edges["left"] and vx <= edge_px) or (edges["right"] and vx + vw >= sw - edge_px)
+                    or (edges["top"] and vy <= edge_px) or (edges["bottom"] and vy + vh >= sh - edge_px)):
                 frame.append(span)
         for how, spans in (("crop", crop), ("frame", frame)):
             share = it["frac"] * _union_s(spans) / max(1e-6, dur) if spans else 0.0
@@ -2703,7 +2732,8 @@ def crop_slice_verdict(slices, crop_max=SLICE_CROP_SHARE_MAX, share_max=SLICE_SH
 def measure_crop_slices(src_media, start_s, end_s, views, scan=None, words=None, layout=None):
     """Graphics sliced by the crop, on the source window + the render's crop views. A dual view
     (``layout``) is read on its top panel: no zoom window (slice_views), and frame edges by the
-    text that reaches them (crop_slices ``text_edges``)."""
+    text that reaches them (crop_slices ``text_edges``); a gamefit render's frame edges are none
+    (frame_edges_cut)."""
     views = slice_views(views, layout)
     if views is None:
         return {"passed": None, "reason": "render reported no crop views"}
@@ -2717,7 +2747,8 @@ def measure_crop_slices(src_media, start_s, end_s, views, scan=None, words=None,
     if words is None:
         words = ocr_source_text(str(src_media), start_s, dur, (sc["src_w"], sc["src_h"]))
     return crop_slice_verdict(crop_slices(sc, views, dur, words=words,
-                                          text_edges=layout == DUAL_VIEW_LAYOUT))
+                                          text_edges=layout == DUAL_VIEW_LAYOUT,
+                                          frame_edges=frame_edges_cut(layout)))
 
 
 # ---------------------------------------------------------------- boxed broadcast (broadcast gate 10-21)
@@ -3766,7 +3797,8 @@ def gate(video_path, *, plan=None, clip_meta=None, campaign=None, words=None,
     try:
         report["visual_quality"] = measure_visual_quality(
             video_path, blur_fill_frac=blur_fill_frac,
-            sliver_frac=(report.get("boxed_slices") or {}).get("sliver_frac"))
+            sliver_frac=(report.get("boxed_slices") or {}).get("sliver_frac"),
+            **blur_fill_layout_kw(rendered_layout))
     except Exception as e:        # noqa: BLE001
         report["visual_quality"] = {"passed": None, "reason": f"{type(e).__name__}: {e}"}
 

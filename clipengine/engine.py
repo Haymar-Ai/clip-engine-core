@@ -1235,7 +1235,8 @@ def _run_stream_lean_gate(mp4_path, clip, qc, words, src_media=None):
     # brightness / contrast / sharpness / blur-fill on the pixels
     try:
         report["visual_quality"] = quality_gate.measure_visual_quality(
-            mp4_path, blur_fill_frac=qc.get("blur_fill_frac"))
+            mp4_path, blur_fill_frac=qc.get("blur_fill_frac"),
+            **quality_gate.blur_fill_layout_kw(qc.get("layout")))
     except Exception as e:        # noqa: BLE001
         report["visual_quality"] = {"passed": None,
                                     "reason": f"{type(e).__name__}: {str(e)[:120]}"}
@@ -3816,6 +3817,14 @@ def render(clip):
         # file actually exists on disk — test fixtures that mock subprocess.run skip it. A
         # failing clip is DROPPED (state=failed) with the drop reason in features_json/error.
         gate_pass_note = ""
+        if qc.get("gamefit"):
+            # the render fit the whole frame instead of refusing the window; the clip's render
+            # metadata and the run log keep the refusal it replaced
+            clip = {**clip, "features_json": _features_merge(clip, render=render_meta(qc))}
+            runstate.update_clip(cid, features_json=clip["features_json"])
+            _log("info", "render", f"clip {cid}: layout=gamefit (the whole frame fit to width) "
+                 f"instead of the refusal: {gamefit_note(qc)}", clip_id=cid,
+                 source_id=clip["source_id"])
         if out.exists():
             report = _run_quality_gate(out, clip, qc=qc)
             if report.get("verdict") != "pass":
@@ -3852,7 +3861,7 @@ def render(clip):
                 out.unlink(missing_ok=True)
                 return False
             clip = caption_unresolved(clip, report)
-            feats = _features_merge(clip, gate_report=report)
+            feats = _features_merge(clip, gate_report=report, render=render_meta(qc))
             runstate.update_clip(cid, features_json=feats)
             gate_pass_note = " gate=pass"
         url = _store_clip(out, clip)
@@ -3860,8 +3869,9 @@ def render(clip):
             out.unlink(missing_ok=True)
         runstate.update_clip(cid, render_path=None, out_path=url, state="rendered", qc=qc)
         _log("info", "render", f"clip {cid} rendered -> {url} layout={qc.get('layout')} "
-             f"lufs={qc.get('integrated_lufs')}{gate_pass_note}", clip_id=cid,
-             source_id=clip["source_id"])
+             f"lufs={qc.get('integrated_lufs')}{gate_pass_note}"
+             + (f" (gamefit instead of: {gamefit_note(qc)})" if qc.get("gamefit") else ""),
+             clip_id=cid, source_id=clip["source_id"])
         return True
     except Exception as e:
         runstate.update_clip(cid, state="failed", error=str(e)[:400], features_json=_features_merge(
@@ -3873,6 +3883,25 @@ def render(clip):
             # is flagged like one the selection probe dropped
             runstate.update_source(clip["source_id"], error=f"{UNCROPPABLE}: render: {e}"[:400])
         return False
+
+
+def render_meta(qc):
+    """The clip's render metadata (features_json["render"]): the layout the render drew and, for
+    gamefit, the refusal it replaced, the layout that refused and the cam inset."""
+    out = {"layout": (qc or {}).get("layout")}
+    gf = (qc or {}).get("gamefit")
+    if gf:
+        out["gamefit"] = {k: gf.get(k) for k in ("replaced", "replaced_layout", "card", "cam_box",
+                                                 "shares")}
+    return out
+
+
+def gamefit_note(qc, n=240):
+    """The refusal a gamefit render replaced, for the run log (its first `n` characters)."""
+    gf = (qc or {}).get("gamefit") or {}
+    why = " ".join(str(gf.get("replaced") or "").split())
+    lay = gf.get("replaced_layout")
+    return (f"[{lay}] " if lay else "") + (why[:n] + ("..." if len(why) > n else ""))
 
 
 # ---- RUN: one source, end to end (cli `run`) ----

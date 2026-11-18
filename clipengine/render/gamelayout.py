@@ -548,6 +548,79 @@ def caption_overlap(cap_y, box, half=CAP_HALF):
         int(box[3])
 
 
+# ---------------------------------------------------------------- gamefit
+
+# A gaming / stream window whose every crop slices text, a HUD or a banner renders the WHOLE game
+# frame fit to the canvas width instead of being refused: the hook header above it, the captions
+# under it, the streamer cam as the inset in a bottom corner (the cam rule's bounds), the rest the
+# frame blurred and darkened (no flat band).
+FIT_SEAM_Y = 1100          # the frame's bottom row for a 16:9 source (the dual view's seam) ...
+FIT_HEADER_MIN = 484       # ... the header above it always holds a 2-line hook (recompose.DV_HEADER_MIN)
+FIT_MIN_AR = 1.2           # a frame narrower than this (w / h) is no landscape game frame: no gamefit
+FIT_CAP_GAP = 85           # the captions' centre line this far under the frame (half the 150 px
+                           # caption block + 10: captions.DUAL_VIEW_CAPTION_GAP)
+FIT_HOOK_TOP = 220         # the hook header's top row (captions.HOOK_TOP less its box pad): above it
+                           # the platform's top UI
+FIT_FILL_DARK = 0.6        # the fill is the frame blurred, at this share of its brightness, for a
+FIT_DARK_LUMA = 55.0       # window this bright (median luma: recompose.DARK_LUMA) or brighter; a
+                           # darker one's fill is darkened less, none at half of it (a dark game's
+                           # darkened fill reads as a black band)
+FIT_CAP_MAX_Y = CAPTION_Y_MAX
+
+
+def fit_geometry(frame_w, frame_h):
+    """Where a gamefit canvas puts things for a frame_w x frame_h game frame (src px): {"fh": the
+    frame's canvas height (fit to OUT_W wide), "frame": [y0, y1] canvas rows, "header": [y0, y1]
+    (the hook's rows), "cap_y": the captions' centre line, "room": rows under the captions a cam
+    card may take (its bottom margin out)}; None when the frame is narrower than FIT_MIN_AR or
+    leaves the captions no row above CAPTION_Y_MAX."""
+    frame_w, frame_h = int(frame_w), int(frame_h)
+    if frame_w <= 0 or frame_h <= 0 or frame_w < FIT_MIN_AR * frame_h:
+        return None
+    fh = even(OUT_W * frame_h / float(frame_w))
+    y0 = even(max(FIT_HEADER_MIN, FIT_SEAM_Y - fh))
+    cap_y = y0 + fh + FIT_CAP_GAP
+    if cap_y > FIT_CAP_MAX_Y:
+        return None
+    room = OUT_H - INSET_MARGIN - (cap_y + CAP_HALF + CAP_CARD_PAD)
+    return {"fh": fh, "frame": [y0, y0 + fh], "header": [FIT_HOOK_TOP, y0], "cap_y": int(cap_y),
+            "room": int(room)}
+
+
+def fit_card(geo, side, max_area=INSET_MAX_AREA):
+    """The cam card [x, y, w, h] of a gamefit canvas (fit_geometry's `geo`): the v3 card's size for
+    the rows under the captions (card_size), in the bottom corner on `side`; None when that is no
+    inset by the cam rule (inset_ok: a bottom corner, <= CAM_INSET_MAX_AREA, >= CAM_INSET_MIN_W of
+    the width)."""
+    card = card_size(geo["room"], max_area=max_area)
+    if not card:
+        return None
+    box = corner_box(card[0], card[1], side)
+    return box if inset_ok(box) else None
+
+
+def fit_fill_dark(luma):
+    """The fill's brightness factor for a window of median luma `luma` (None: unread):
+    FIT_FILL_DARK at FIT_DARK_LUMA or brighter, 1.0 (not darkened) at half of it or darker, linear
+    between."""
+    if luma is None or float(luma) >= FIT_DARK_LUMA:
+        return FIT_FILL_DARK
+    lo = FIT_DARK_LUMA / 2.0
+    if float(luma) <= lo:
+        return 1.0
+    return round(1.0 - (1.0 - FIT_FILL_DARK) * (float(luma) - lo) / (FIT_DARK_LUMA - lo), 3)
+
+
+def fit_shares(fh, card=None):
+    """{"frame", "card", "fill"}: canvas shares of the fit frame, the cam card and the blurred,
+    darkened fill (all the rest; the card never overlaps the frame)."""
+    canvas = float(OUT_W * OUT_H)
+    frame = OUT_W * int(fh)
+    cd = int(card[2]) * int(card[3]) if card else 0
+    return {"frame": round(frame / canvas, 3), "card": round(cd / canvas, 3),
+            "fill": round(max(0.0, 1.0 - (frame + cd) / canvas), 3)}
+
+
 # ---------------------------------------------------------------- action
 
 def _blur(a, sigma):

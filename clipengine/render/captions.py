@@ -262,9 +262,9 @@ def caption_y(layout, fg_h=None):
         # keep the existing screencast caption default (bottom band on the presenter cam
         # is the same shape as manual screencast).
         return CAPTION_Y
-    if layout == "dual_view":
+    if layout in ("dual_view", "gamefit"):
         # captions sit on the seam: the whole caption block just under the full frame (fg_h is
-        # the seam row), never over its graphics
+        # the seam row: gamefit's frame bottom), never over its graphics
         seam = int(fg_h) if fg_h else DUAL_VIEW_SEAM_Y
         return max(200, min(seam + DUAL_VIEW_CAPTION_GAP, CAPTION_Y_MAX))
     return CAPTION_Y

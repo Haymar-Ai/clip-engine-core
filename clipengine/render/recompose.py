@@ -1193,8 +1193,10 @@ def _mid_cam_game_only(src, a, gscfg, size, guard, mask, why, cam=None):
     log(f"gamestack: {why}; game only" + (", the cam kept as the inset" if keep else " (no card)"))
     g = _plan_game_only_v2(src, a, gscfg, size, cam=(guard, mask))
     if g is None:
-        raise RenderError(f"gameplay: no clean game band round the mid-frame cam {list(mask)}: "
+        err = RenderError(f"gameplay: no clean game band round the mid-frame cam {list(mask)}: "
                           f"{why}")
+        err.gamefit_cam = cam          # the cam gamefit's inset shows (gamefit_instead)
+        raise err
     if keep:
         return _attach_cam(g, cam, size, _v2_cfg(gscfg), f"a mid-frame cam: {why}")
     return g
@@ -2160,6 +2162,8 @@ def plan_layout(a, src):
                 "split_px": OUT_H // 2 if a.layout == "split" else a.split}
     if a.layout == "general":
         return {"layout": "general"}
+    if a.layout == GAMEFIT:                  # asked for by name (a manual / repair render)
+        return plan_gamefit(src, a, {})
     if a.layout == DUAL_VIEW:
         p = plan_dual_view(src, a)
         if p is not None:
@@ -2348,6 +2352,8 @@ def blur_fill_frac(plan, a, info):
             fill = round(fill + float(plan.get("cam_mask_share") or 0.0)   # picture either
                          * int(plan["band"]["out_h"]) / float(OUT_H), 3)
         return fill
+    if layout == GAMEFIT:                       # gamefit: all but the frame and the card
+        return gamelayout.fit_shares(plan["frame_h"], plan.get("card"))["fill"]
     if plan.get("manual"):
         bmode = a.bottom_mode or ("fit" if layout == "screencast" else "cover")
         if bmode == "fit":
@@ -2568,7 +2574,14 @@ def keep_cam(plan, a, src):
     rep = {"rule": True, "layout": lay, "source_cam": None, "inset": None}
     speaker = lay in TRACK_LIKE_LAYOUTS + ("split",) and \
         (plan.get("banner_guard") or {}).get("action") != "full_bleed_action"
-    if lay == "gamestack" and plan.get("v2") and plan.get("card"):
+    if lay == GAMEFIT:                          # gamefit: the card under the captions
+        if plan.get("card"):
+            rep.update(source_cam=list(plan["cam_box"]), how=plan.get("cam_how"),
+                       inset=list(plan["card"]), over=False,
+                       why="gamefit: the cam as the inset under the captions")
+        else:
+            rep["why"] = "the source has no streamer cam (window and source detection)"
+    elif lay == "gamestack" and plan.get("v2") and plan.get("card"):
         rep.update(source_cam=list(plan.get("cam_box") or []),
                    how=plan.get("cam_how") or ("split" if plan.get("streamer_split") else None),
                    inset=list(plan["card"]), over=bool(plan.get("card_over")),
@@ -5103,7 +5116,8 @@ def gate_slice_check(plan, a, src):
     lay = plan.get("layout")
     v = qg.crop_slice_verdict(qg.crop_slices(_scan(src, a, (sw, sh)), qg.slice_views(views, lay),
                                              a.dur, words=_ocr(src, a, (sw, sh)),
-                                             text_edges=lay == DUAL_VIEW))
+                                             text_edges=lay == DUAL_VIEW,
+                                             frame_edges=qg.frame_edges_cut(lay)))
     if not v["passed"]:
         raise RenderError(f"crop would slice a source banner or graphic: the quality gate would "
                           f"fail the {lay} crop ({'; '.join(v['errors'])})")
@@ -5216,6 +5230,250 @@ def full_bleed_action(plan, a, src, why):
     return rep
 
 
+# ---------------------------------------------------------------- gamefit
+
+# Gaming and stream renders died as recompose exit 1 because no crop of the frame kept the HUD,
+# the banners or the burned-in text whole (hud_layout, the slice ladder, the pre-encode checks);
+# role-play streams carry mid-frame cams, banners, phone UI and minimaps. A gaming / stream window
+# the layouts above refuse renders gamefit instead (gamelayout.fit_geometry): the WHOLE game frame
+# fit to the canvas width (no crop edge, so nothing is sliced: gameplay is 100 % of the width), the
+# hook on the header above it, the captions under it, the streamer cam as the inset in a bottom
+# corner (the cam rule's bounds), the rest the frame blurred and darkened. The order of preference
+# is unchanged: gamefit only replaces a refusal, and a cam it cannot place as the inset leaves the
+# refusal.
+GAMEFIT = "gamefit"
+GAMEFIT_REFUSAL = re.compile(r"slic|no clean|face-follow|clean crop", re.I)   # the refusals of a
+                                                       # crop that keeps no text / HUD whole
+GAMEFIT_PLAN_LAYOUTS = ("gamestack", "game_only", DUAL_VIEW)   # the planner read a game
+GAMEFIT_REQUESTS = ("auto", "gamestack")   # the layouts a first render asks for
+
+
+def gamefit_allowed(a, prior=None):
+    """Whether a refused window may render gamefit: a gaming / streamers clip (stack_allowed: the
+    stream vertical without --niche) that is gameplay (game_band_only) or that the planner read as
+    a game (a game band, the streamer split, the dual view), on a render that asked for the layout
+    to be chosen (GAMEFIT_REQUESTS). A talking head or IRL stream whose speaker crop slices keeps its
+    refusal (its layouts are unchanged), and so does a repair lane recrop (--clean-crop, --layout
+    track): its own refusal, not a gamefit of the clip the eye-check rejected."""
+    prior = prior or {}
+    if prior.get("manual") or not stack_allowed(a) or getattr(a, "clean_crop", None) \
+            or getattr(a, "layout", "auto") not in GAMEFIT_REQUESTS:
+        return False
+    return prior.get("layout") in GAMEFIT_PLAN_LAYOUTS or bool(prior.get("streamer_split")) or \
+        game_band_only(a)
+
+
+def _prior_cam(prior, size):
+    """stream_cam's dict ({"box", "face", "how"}, src px) of the cam the refused game plan carried
+    (its cam box and median face), or None."""
+    box = (prior or {}).get("cam_box")
+    if prior.get("layout") not in GAMEFIT_PLAN_LAYOUTS or not box or len(box) != 4:
+        return None
+    sw, sh = size
+    fm = prior.get("face_median")
+    face = (float(fm[0]) * sw, float(fm[1]) * sh, float(fm[2]) * sh) if fm else None
+    return {"box": [int(v) for v in box], "face": face,
+            "how": prior.get("cam_how") or f"the {prior.get('layout')} plan's"}
+
+
+def plan_gamefit(src, a, info, prior=None, cam=None):
+    """The gamefit plan of the window: the frame (inside its source bars, source_bars) fit to the
+    canvas width at gamelayout.fit_geometry's rows, the hook header above, the captions under it,
+    and the cam as the card in the bottom corner on its side (gamelayout.fit_card, cut from the cam
+    box round the face: inset_crop). The cam: `cam` (a stream_cam-shaped dict), else the refused
+    game plan's (`prior`), else stream_cam (the window, then the source); no cam, no card. Raises
+    RenderError when the frame is too narrow to fit or a cam cannot be placed as the inset."""
+    prior = prior or {}
+    sw = int(prior.get("src_w") or info.get("width") or 0)
+    sh = int(prior.get("src_h") or info.get("height") or 0)
+    if not (sw and sh):
+        sw, sh = reframe.probe_size(str(src))
+    inner = None
+    try:
+        inner = source_bars(src, a, sw, sh)
+    except Exception as e:        # noqa: BLE001 - the whole frame then
+        log(f"gamefit: bars unreadable ({type(e).__name__}: {e})")
+    fw, fh = (inner["w"], inner["h"]) if inner else (sw, sh)
+    geo = gamelayout.fit_geometry(fw, fh)
+    if geo is None:
+        raise RenderError(f"gamefit: a {fw}x{fh} frame fit to width leaves no room for the hook "
+                          f"header, the captions and the cam inset")
+    if cam is None:
+        cam = _prior_cam(prior, (sw, sh))
+    if cam is None:
+        cam = stream_cam(src, a, (sw, sh))
+    y0, y1 = geo["frame"]
+    plan = {"layout": GAMEFIT, "src_w": sw, "src_h": sh, "frame_y": y0, "frame_h": geo["fh"],
+            "header": list(geo["header"]), "cap_y": geo["cap_y"], "fg_h": y1, "card": None,
+            "card_side": None, "cam": None, "cam_box": None}
+    if inner:
+        plan["frame"] = inner
+        log(f"gamefit: the frame inside its source bars {inner['bars']}: {inner['w']}x{inner['h']} "
+            f"at {inner['x']},{inner['y']}")
+    plan["fill_dark"] = gamelayout.fit_fill_dark(_window_luma(src, a, (sw, sh)))
+    if cam:
+        side = "left" if cam["box"][0] + cam["box"][2] < sw else "right"
+        card = gamelayout.fit_card(geo, side, max_area=_v2_cfg(_gamestack_cfg())["area"])
+        if card is None:
+            raise RenderError(f"gamefit: the cam {list(cam['box'])} cannot be placed as the inset "
+                              f"({geo['room']} rows under the captions)")
+        crop = _fit_card_crop(src, a, (sw, sh), cam, card)
+        if crop is None:
+            raise RenderError(f"gamefit: the cam {list(cam['box'])} has no card cut that keeps its "
+                              f"face whole and slices no burned-in text")
+        cw, ch, cx, cy = crop
+        face = cam.get("face")
+        plan.update(card=list(card), card_side=side, cam=[cw, ch, cx, cy],
+                    cam_box=list(cam["box"]), cam_how=cam.get("how"),
+                    face_median=[face[0] / sw, face[1] / sh, face[2] / sh] if face else None)
+    sh_ = gamelayout.fit_shares(geo["fh"], plan["card"])
+    log(f"gamefit: the {fw}x{fh} frame fit to width at canvas rows {geo['frame']} "
+        f"({sh_['frame']:.0%}), the hook header {geo['header']}, captions y {geo['cap_y']}, "
+        + (f"the cam {plan['cam_box']} ({plan['cam_how']}) as a {plan['card'][2]}x"
+           f"{plan['card'][3]} inset bottom-{plan['card_side']} ({sh_['card']:.0%})"
+           if plan["card"] else "no cam (the source has no streamer cam)")
+        + f"; blurred fill {sh_['fill']:.0%} at {plan['fill_dark']:.0%} of its brightness")
+    return plan
+
+
+def _window_luma(src, a, size):
+    """The window's median frame luma (measure_levels' read: 0.5 fps, 160 px wide), None when the
+    frames cannot be read."""
+    try:
+        import cv2
+        import numpy as np
+        frames = [cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY) for _t, fr in reframe.iter_frames(
+            str(src), a.start, a.dur, fps=0.5, width=160, src_size=tuple(size))]
+        return float(np.median([float(f.mean()) for f in frames])) if frames else None
+    except Exception as e:        # noqa: BLE001 - unread: the default darkening
+        log(f"gamefit: window luma unreadable ({type(e).__name__}: {e})")
+        return None
+
+
+GAMEFIT_CARD_STEP = 4           # src px: card cuts tried, inset_crop's height, then smaller down
+GAMEFIT_CARD_MIN_FRAC = 0.5     # to this share of it, never upscaled past SPLIT_CAM_MAX_UPSCALE
+                                # (a cam box snapped to its overlay's borders holds the overlay's
+                                # labels under the face)
+
+
+def _fit_card_crop(src, a, size, cam, card):
+    """(cw, ch, cx, cy) src px: the card's cut of the cam box: inset_crop's (the face centred)
+    when it slices none of the text items the gate reads (quality_gate.text_items, padded
+    LADDER_TEXT_PAD), else the window nearest it inside the box at the card's aspect, smaller down
+    to GAMEFIT_CARD_MIN_FRAC of its height, that keeps the face whole (grown to hair and chin, then
+    the face alone) and every item whole or out; None when none does. Unreadable text: inset_crop's
+    (gate_slice_check measures it)."""
+    sw, sh = size
+    kw, kh = int(card[2]), int(card[3])
+    cw, ch, cx, cy = gamelayout.inset_crop(cam["box"], cam.get("face"), kw, kh)
+    try:
+        from clipengine import quality_gate as qg
+        items = [list(map(int, it["box"])) for it in qg.text_items(_scan(src, a, size),
+                                                                   _ocr(src, a, size))]
+    except Exception as e:        # noqa: BLE001 - unmeasured here: the gate's check measures it
+        log(f"gamefit: text unreadable for the card ({type(e).__name__}: {e})")
+        return cw, ch, cx, cy
+    pad = LADDER_TEXT_PAD
+    items = [[b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad] for b in items]
+    if not any(cropcheck.cuts([cx, cy, cx + cw, cy + ch], b) for b in items):
+        return cw, ch, cx, cy
+    bx0, by0, bx1, by1 = (int(v) for v in cam["box"])
+    bw, bh = bx1 - bx0, by1 - by0
+    rel = [[b[0] - bx0, b[1] - by0, b[2] - bx0, b[3] - by0] for b in items
+           if b[0] < bx1 and b[2] > bx0 and b[1] < by1 and b[3] > by0]
+    keeps = [None]
+    if cam.get("face"):
+        fx, fy, fh = (float(v) for v in cam["face"])
+        grown = _face_keep((fx / sw, fy / sh, fh / sh), sw, sh)
+        keeps = [grown, [fx - 0.4 * fh, fy - 0.5 * fh, fx + 0.4 * fh, fy + 0.5 * fh]]
+    keeps = [None if k is None else [max(0.0, k[0] - bx0), max(0.0, k[1] - by0),
+                                     min(bw, k[2] - bx0), min(bh, k[3] - by0)] for k in keeps]
+    heights = range(int(ch), int(GAMEFIT_CARD_MIN_FRAC * ch) - 1, -GAMEFIT_CARD_STEP)
+    for keep in keeps:
+        for h in (_even(v) for v in heights):
+            w = _even(h * kw / float(kh))
+            if h < 2 or kh / float(h) > SPLIT_CAM_MAX_UPSCALE:
+                break
+            pos = cropcheck.find_window(w, h, bw, bh, rel, contain=keep,
+                                        prefer=(cx - bx0 + (cw - w) / 2.0,
+                                                cy - by0 + gamelayout.INSET_FACE_Y * (ch - h)))
+            if pos is not None:
+                log(f"gamefit: the card's cut {cw}x{ch} at {cx},{cy} slices text; {w}x{h} at "
+                    f"{bx0 + pos[0]},{by0 + pos[1]} instead ({len(rel)} item(s) whole or out)")
+                return w, h, _even(bx0 + pos[0]), _even(by0 + pos[1])
+    log(f"gamefit: no card cut of the cam {list(cam['box'])} keeps the face whole and the "
+        f"{len(rel)} text item(s) round it whole or out")
+    return None
+
+
+def gamefit_vf(plan):
+    """gamefit: the frame (inside its bars) scaled to the canvas width at row frame_y over the whole
+    frame stretched to the canvas (its rows top to bottom, every column: a cover crop's top rows
+    were a game's flat sky, a flat band to the gate), blurred (at 1 / FILL_SCALE, as the v2 fill)
+    and darkened to plan["fill_dark"] (gamelayout.fit_fill_dark); the cam card in its bottom
+    corner with the inset's light frame."""
+    fy, fh = int(plan["frame_y"]), int(plan["frame_h"])
+    fr = plan.get("frame")
+    inner = f"crop={fr['w']}:{fr['h']}:{fr['x']}:{fr['y']}," if fr else ""
+    fw4, fh4 = OUT_W // gamelayout.FILL_SCALE, OUT_H // gamelayout.FILL_SCALE
+    k = float(plan.get("fill_dark", gamelayout.FIT_FILL_DARK))
+    card = plan.get("card")
+    parts = [f"[0:v]split={3 if card else 2}[gff][gfm]" + ("[gfc]" if card else ""),
+             f"[gff]{inner}scale={fw4}:{fh4},gblur=sigma={gamelayout.FILL_SIGMA},"
+             f"colorchannelmixer=rr={k}:gg={k}:bb={k},scale={OUT_W}:{OUT_H},setsar=1[gfill]",
+             f"[gfm]{inner}scale={OUT_W}:{fh}:flags=lanczos,setsar=1[gframe]"]
+    if not card:
+        return ";".join(parts + [f"[gfill][gframe]overlay=0:{fy},setsar=1[v0]"])
+    cw, ch, cx, cy = (int(v) for v in plan["cam"])
+    kx, ky, kw, kh = (int(v) for v in card)
+    return ";".join(parts + [
+        f"[gfc]crop={cw}:{ch}:{cx}:{cy},scale={kw}:{kh}:flags=lanczos,setsar=1,"
+        f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t={gamelayout.INSET_BORDER}[gcard]",
+        f"[gfill][gframe]overlay=0:{fy}[gfa]",
+        f"[gfa][gcard]overlay={kx}:{ky},setsar=1[v0]"])
+
+
+def gamefit_instead(a, src, info, err, prior=None):
+    """(plan, guard report) of the gamefit render that replaces the refusal `err` (a RenderError
+    whose crop could keep no text / HUD / banner whole: GAMEFIT_REFUSAL) of a window gamefit_allowed
+    takes; None (the refusal stands as it was) for any other refusal or window. Its cam is the
+    refused plan's (`prior`, the planner's plan) or the one the refusal carries (err.gamefit_cam: a
+    mid-frame cam no game band took). The gamefit plan gets the checks a plan gets before the encode
+    (keep_cam records its inset, gate_slice_check measures the card's crop); a frame that cannot be
+    fit, a cam that cannot be placed or a check that fails raises RenderError with both reasons (the
+    refusal's last, as the engine classifies it)."""
+    why = str(err)
+    if not GAMEFIT_REFUSAL.search(why) or not gamefit_allowed(a, prior):
+        return None
+    log(f"gamefit instead of the refusal: {why}")
+    try:
+        plan = plan_gamefit(src, a, info, prior, cam=getattr(err, "gamefit_cam", None))
+        rep = {"action": GAMEFIT, "layout": GAMEFIT, "why": why[:600],
+               "replaced": (prior or {}).get("layout")}
+        plan["banner_guard"] = rep
+        plan["gamefit"] = {"replaced": why[:600], "replaced_layout": (prior or {}).get("layout")}
+        enforce_game_band(plan, a)
+        try:
+            keep_cam(plan, a, src)
+        except RenderError:
+            raise
+        except Exception as e:    # noqa: BLE001 - unmeasured: the plan as chosen (QC says so)
+            log(f"cam inset: check failed ({type(e).__name__}: {e})")
+            plan["cam_inset"] = {"rule": True, "error": f"{type(e).__name__}: {e}"}
+        try:
+            gate_slice_check(plan, a, src)
+        except RenderError:
+            raise
+        except Exception as e:    # noqa: BLE001 - unmeasured here: the gate measures the render
+            log(f"pre-encode slice check unavailable ({type(e).__name__}: {e})")
+    except RenderError as e:
+        msg = str(e) if str(e).startswith("gamefit") else f"gamefit: {e}"
+        raise RenderError(f"{msg}; {why}")
+    return plan, rep
+
+
+
+
 def clean_crop_plan(plan, a, src):
     """--clean-crop: replace the banner guard with the clean speaker crop
     (render/cleancrop.py): the largest full-bleed 9:16 window that keeps the speaker, stays in
@@ -5321,6 +5579,8 @@ def _layout_graph(plan, a):
         return split_vf(plan)
     if layout == DUAL_VIEW:
         return dual_view_vf(plan)
+    if layout == GAMEFIT:
+        return gamefit_vf(plan)
     return general_vf(plan)
 
 
@@ -5509,6 +5769,13 @@ def crop_views(plan, dur):
     elif layout == "general" and plan.get("content_box"):
         b = plan["content_box"]                   # the screen fit's box edges
         add(b["x"], b["y"], b["w"], b["h"])
+    elif layout == GAMEFIT:                       # the whole frame (inside its bars) and the cam
+        fr = plan.get("frame")                    # card's cut of the cam box
+        if fr:
+            add(fr["x"], fr["y"], fr["w"], fr["h"])
+        if plan.get("cam"):
+            cw, ch, cx, cy = plan["cam"]
+            add(cx, cy, cw, ch)
     if plan.get("cam_overlay"):                   # the inset's cut of the cam
         cw, ch, cx, cy = plan["cam_overlay"]["crop"]
         add(cx, cy, cw, ch)
@@ -5672,7 +5939,7 @@ def parse_args(argv=None):
                                           "broadcast", "hudband", "gamestack", "reaction",
                                           "chart_top_cam_bottom", "product_full_bleed",
                                           "full_bleed_speaker", "podcast_two_shot",
-                                          "dual_view"],
+                                          "dual_view", "gamefit"],
                     default="auto")
     ap.add_argument("--niche", default=None,
                     help="daily niche of the clip (gaming, streamers, podcasts, finance, tech, "
@@ -5735,8 +6002,36 @@ def parse_args(argv=None):
 def choose_layout(a, src, info):
     """(plan, guard report): the window planned and its layout chosen, everything main does
     before the encode. Raises RenderError when the
-    clip has no layout that ships (no clean crop: rejected before the encode)."""
+    clip has no layout that ships (no clean crop: rejected before the encode). A gaming / stream
+    window those layouts refuse because no crop keeps its text / HUD / banners whole renders
+    gamefit instead (gamefit_instead); the refusal stands where gamefit cannot."""
+    seen = {}
+    try:
+        return _choose_layout(a, src, info, seen)
+    except RenderError as e:
+        if a.layout == GAMEFIT:
+            raise
+        alt = gamefit_instead(a, src, info, e, seen.get("plan"))
+        if alt is None:
+            raise
+        return alt
+
+
+def _choose_layout(a, src, info, seen):
+    """choose_layout's layouts in their order; `seen["plan"]` gets a copy of the planner's plan."""
+    import copy
     plan = plan_layout(a, src)
+    seen["plan"] = copy.deepcopy(plan)
+    if plan.get("layout") == GAMEFIT:               # --layout gamefit (a manual / repair render)
+        try:
+            keep_cam(plan, a, src)
+        except RenderError:
+            raise
+        except Exception as e:    # noqa: BLE001 - unmeasured: the plan as chosen (QC says so)
+            log(f"cam inset: check failed ({type(e).__name__}: {e})")
+            plan["cam_inset"] = {"rule": True, "error": f"{type(e).__name__}: {e}"}
+        gate_slice_check(plan, a, src)
+        return plan, None
     if dual_view_fallback(a):
         guard = to_dual_view(plan, a, src, f"{a.niche} dual view fallback: the single view "
                              "sliced the screen")
@@ -5892,6 +6187,9 @@ def main(argv=None):
             if layout == DUAL_VIEW:
                 # captions sit just under the seam, clear of the full frame's graphics
                 fg_h = int(plan["seam_y"])
+            if layout == GAMEFIT:
+                # captions just under the fit frame, above the cam card
+                fg_h = int(plan["fg_h"])
             text_avoid = None
             hook, hook_info, hook_why = a.hook, {}, None
             if a.hook:
@@ -5914,14 +6212,19 @@ def main(argv=None):
                 cz = textzones.clip_text_bands(src, a.start, a.dur, vgraph)
                 default_y = captions.caption_y(layout, fg_h)
                 # a dual view's captions only move down, into the zoom panel; a v3 gamestack's
-                # only up, staying on the band (under it sits the card)
+                # only up, staying on the band (under it sits the card); gamefit's only down, off
+                # the frame, staying above the card
                 cap_y = captions.free_caption_y(cz["bands"], default_y, **(
                     {"lo": default_y} if layout == DUAL_VIEW else
+                    dict({"lo": default_y}, **({"hi": int(plan["card"][1]) - gamelayout.CAP_HALF
+                                                - gamelayout.CAP_CARD_PAD}
+                                               if plan.get("card") else {}))
+                    if layout == GAMEFIT else
                     {"hi": int(plan["cap_y"])} if plan.get("header") else {}))
                 plan["caption_zone"] = {"bands": cz["bands"], "frames": cz["frames"],
                                         "default_y": default_y, "y": cap_y}
                 log(f"caption zone: y={cap_y} (default {default_y}), text bands {cz['bands']}")
-            if cap_y is None and plan.get("v2"):
+            if cap_y is None and (plan.get("v2") or layout == GAMEFIT):
                 cap_y = int(plan["cap_y"])           # game only v2 too (caption_y has no row)
             if plan.get("cam_overlay"):
                 # the captions sit above the cam inset overlaid on the frame
@@ -6019,6 +6322,13 @@ def main(argv=None):
                 ci.update(cap_y=int(cap_eff),
                           cap_clear=not gamelayout.caption_overlap(cap_eff, ci["inset"]))
             rep["cam_inset"] = ci
+        if layout == GAMEFIT:                           # gamefit: what it replaced, its rows
+            rep["gamefit"] = dict(plan.get("gamefit") or {},
+                                  frame=[0, int(plan["frame_y"]), OUT_W, int(plan["frame_h"])],
+                                  header=plan["header"], cap_y=plan["cap_y"], card=plan.get("card"),
+                                  cam_box=plan.get("cam_box"), cam_how=plan.get("cam_how"),
+                                  bars=(plan.get("frame") or {}).get("bars"),
+                                  shares=gamelayout.fit_shares(plan["frame_h"], plan.get("card")))
         if layout == DUAL_VIEW:
             rep["panels"] = dual_view_panels(plan)      # the gate's edge bands read "top"
             rep["dual_view"] = {"bottom": plan.get("bottom"), "zoom": plan.get("zoom"),
